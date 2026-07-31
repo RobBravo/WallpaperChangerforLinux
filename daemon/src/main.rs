@@ -19,7 +19,10 @@ fn unix_now() -> i64 {
         .as_secs() as i64
 }
 
-fn apply_and_record<B: wallpaper_core::backend::WallpaperBackend>(engine: &mut Engine<B>) {
+fn apply_and_record<B: wallpaper_core::backend::WallpaperBackend>(
+    engine: &mut Engine<B>,
+    state_path: &std::path::Path,
+) {
     match engine.apply_next() {
         Ok(Some(path)) => {
             let next_change_at_unix = unix_now() + engine.interval().as_secs() as i64;
@@ -27,7 +30,7 @@ fn apply_and_record<B: wallpaper_core::backend::WallpaperBackend>(engine: &mut E
                 current_wallpaper: path,
                 next_change_at_unix,
             };
-            if let Err(e) = state.save() {
+            if let Err(e) = state.save_to(state_path) {
                 eprintln!("failed to write state.toml: {e}");
             }
         }
@@ -39,9 +42,10 @@ fn apply_and_record<B: wallpaper_core::backend::WallpaperBackend>(engine: &mut E
 fn run<B: wallpaper_core::backend::WallpaperBackend>(
     mut engine: Engine<B>,
     rx: Receiver<DaemonEvent>,
+    state_path: std::path::PathBuf,
 ) -> anyhow::Result<()> {
     if !engine.is_paused() {
-        apply_and_record(&mut engine);
+        apply_and_record(&mut engine, &state_path);
     }
     let mut deadline = SystemTime::now() + engine.interval();
 
@@ -59,12 +63,12 @@ fn run<B: wallpaper_core::backend::WallpaperBackend>(
                 deadline = SystemTime::now() + engine.interval();
             }
             Ok(DaemonEvent::ChangeNowRequested) => {
-                apply_and_record(&mut engine);
+                apply_and_record(&mut engine, &state_path);
                 deadline = SystemTime::now() + engine.interval();
             }
             Err(RecvTimeoutError::Timeout) => {
                 if !engine.is_paused() {
-                    apply_and_record(&mut engine);
+                    apply_and_record(&mut engine, &state_path);
                 }
                 deadline = SystemTime::now() + engine.interval();
             }
@@ -83,7 +87,7 @@ fn main() -> anyhow::Result<()> {
     let _watcher = watcher::spawn_watcher(config_dir(), tx)?;
     tray::spawn_tray();
 
-    run(engine, rx)
+    run(engine, rx, wallpaper_core::state::state_path())
 }
 
 #[cfg(test)]
@@ -122,10 +126,11 @@ mod tests {
 
         let (tx, rx) = channel();
         let config_dir = dir.path().to_path_buf();
+        let state_path = dir.path().join("state.toml");
         let _watcher = watcher::spawn_watcher(config_dir.clone(), tx).unwrap();
 
         let handle = thread::spawn(move || {
-            let _ = run(engine, rx);
+            let _ = run(engine, rx, state_path);
         });
 
         std::fs::write(config_dir.join("change_now_request"), b"1").unwrap();
