@@ -1,0 +1,7 @@
+[package]
+name = "wallpaper-changer-gui"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+wallpaper-core = { path = "../core" }
