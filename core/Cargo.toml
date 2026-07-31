@@ -10,8 +10,10 @@ path = "src/lib.rs"
 [dependencies]
 anyhow = "1.0.104"
 dirs = "6.0.0"
+rand = "0.10.2"
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.4"
+zbus = "5.18.0"
 
 [dev-dependencies]
 tempfile = "3.27.0"
