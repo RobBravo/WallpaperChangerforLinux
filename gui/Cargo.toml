@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+anyhow = "1.0.104"
+rfd = "0.17.2"
 slint = "1.17.1"
 wallpaper-core = { path = "../core" }
 
