@@ -18,6 +18,12 @@ impl WallpaperQueue {
         self.all.is_empty()
     }
 
+    /// The full set of images this queue was built from, in the order it was given.
+    /// Callers use it to detect that the folder's contents have drifted from the queue.
+    pub fn all(&self) -> &[PathBuf] {
+        &self.all
+    }
+
     pub fn next(&mut self) -> Option<PathBuf> {
         if self.all.is_empty() {
             return None;

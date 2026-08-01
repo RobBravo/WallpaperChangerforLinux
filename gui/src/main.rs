@@ -1,5 +1,9 @@
 slint::include_modules!();
 
+use std::cell::RefCell;
+use std::path::PathBuf;
+use std::rc::Rc;
+
 use wallpaper_core::config::{change_now_request_path, Config, IntervalUnit};
 use wallpaper_core::state::State;
 
@@ -19,11 +23,31 @@ fn index_to_unit(index: i32) -> IntervalUnit {
     }
 }
 
-fn refresh_state(ui: &AppWindow) {
+/// Refreshes everything the window shows from the on-disk config/state.
+///
+/// `shown_wallpaper` remembers which image is currently displayed: the underlying
+/// wallpaper only changes every few minutes, so decoding it again on every one-second
+/// tick would mean a full 4K decode per second for as long as the window is open.
+fn refresh_state(ui: &AppWindow, shown_wallpaper: &RefCell<Option<PathBuf>>) {
+    // The daemon's tray menu can pause/resume behind our back, so re-read the flag
+    // rather than trusting the value the window was started with.
+    if let Ok(config) = Config::load() {
+        if ui.get_paused() != config.paused {
+            ui.set_paused(config.paused);
+        }
+    }
+
     let Ok(state) = State::load() else { return };
 
-    if let Ok(image) = slint::Image::load_from_path(&state.current_wallpaper) {
-        ui.set_preview_image(image);
+    let already_shown = shown_wallpaper
+        .borrow()
+        .as_deref()
+        .is_some_and(|shown| shown == state.current_wallpaper.as_path());
+    if !already_shown {
+        if let Ok(image) = slint::Image::load_from_path(&state.current_wallpaper) {
+            ui.set_preview_image(image);
+            *shown_wallpaper.borrow_mut() = Some(state.current_wallpaper.clone());
+        }
     }
 
     let now = std::time::SystemTime::now()
@@ -45,7 +69,9 @@ fn main() -> anyhow::Result<()> {
     ui.set_interval_value(config.interval_value as i32);
     ui.set_interval_unit_index(unit_to_index(config.interval_unit));
     ui.set_paused(config.paused);
-    refresh_state(&ui);
+
+    let shown_wallpaper: Rc<RefCell<Option<PathBuf>>> = Rc::new(RefCell::new(None));
+    refresh_state(&ui, &shown_wallpaper);
 
     ui.on_choose_folder({
         let ui_handle = ui.as_weak();
@@ -85,12 +111,14 @@ fn main() -> anyhow::Result<()> {
         let ui_handle = ui.as_weak();
         move || {
             if let Some(ui) = ui_handle.upgrade() {
-                let config = Config {
-                    folder: std::path::PathBuf::from(ui.get_folder_path().to_string()),
-                    interval_value: ui.get_interval_value() as u64,
-                    interval_unit: index_to_unit(ui.get_interval_unit_index()),
-                    paused: ui.get_paused(),
-                };
+                // Only the fields this window owns are written back. `paused` is owned by
+                // the pause toggle (here and in the daemon's tray), so it is carried over
+                // from the freshly-loaded file - otherwise saving here would silently undo
+                // a pause set from the tray while this window was open.
+                let Ok(mut config) = Config::load() else { return };
+                config.folder = PathBuf::from(ui.get_folder_path().to_string());
+                config.interval_value = ui.get_interval_value() as u64;
+                config.interval_unit = index_to_unit(ui.get_interval_unit_index());
                 let _ = config.save();
             }
         }
@@ -99,12 +127,13 @@ fn main() -> anyhow::Result<()> {
     let timer = slint::Timer::default();
     {
         let ui_handle = ui.as_weak();
+        let shown_wallpaper = shown_wallpaper.clone();
         timer.start(
             slint::TimerMode::Repeated,
             std::time::Duration::from_secs(1),
             move || {
                 if let Some(ui) = ui_handle.upgrade() {
-                    refresh_state(&ui);
+                    refresh_state(&ui, &shown_wallpaper);
                 }
             },
         );
