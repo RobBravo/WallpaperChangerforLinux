@@ -80,12 +80,15 @@ fn open_config_gui() {
 }
 
 pub fn spawn_tray() {
-    // ksni 0.3.6's blocking API is `TrayMethods::spawn`, not the
-    // `TrayService::new(...).run_blocking()` shape from older ksni versions.
-    // `spawn()` registers the item over D-Bus and runs its event loop on its
-    // own background thread internally, returning immediately with a
-    // `Handle` — so no extra `std::thread::spawn` wrapper is needed here.
-    if let Err(e) = DaemonTray.spawn() {
-        eprintln!("tray: failed to start system tray icon: {e}");
-    }
+    // ksni 0.3.6's blocking API is `TrayMethods::spawn`. Its initial D-Bus
+    // session connect + `request_name` + `register_status_notifier_item`
+    // handshake run synchronously on the calling thread before `spawn()`
+    // returns a `Handle` for the backgrounded service loop. To keep that
+    // handshake from delaying the daemon's own startup, the whole tray
+    // setup runs on its own OS thread rather than on `main()`'s thread.
+    std::thread::spawn(|| {
+        if let Err(e) = DaemonTray.spawn() {
+            eprintln!("tray: failed to start system tray icon: {e}");
+        }
+    });
 }
