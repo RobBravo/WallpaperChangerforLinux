@@ -1,0 +1,76 @@
+import { Button, ComboBox, SpinBox, LineEdit } from "std-widgets.slint";
+
+export component AppWindow inherits Window {
+    title: "Wallpaper Changer";
+    width: 420px;
+    height: 480px;
+
+    in property <image> preview-image;
+    in-out property <string> folder-path;
+    in-out property <int> interval-value: 30;
+    in-out property <int> interval-unit-index: 0;
+    in property <string> countdown-text: "";
+    in property <bool> paused: false;
+
+    callback choose-folder();
+    callback toggle-pause();
+    callback change-now();
+    callback save();
+
+    VerticalLayout {
+        padding: 16px;
+        spacing: 12px;
+
+        Image {
+            source: preview-image;
+            height: 160px;
+            image-fit: contain;
+        }
+
+        Text { text: "Carpeta de fondos"; }
+        HorizontalLayout {
+            spacing: 6px;
+            LineEdit {
+                text: folder-path;
+                enabled: false;
+            }
+            Button {
+                text: "Elegir…";
+                clicked => { choose-folder(); }
+            }
+        }
+
+        Text { text: "Cambiar cada"; }
+        HorizontalLayout {
+            spacing: 6px;
+            SpinBox {
+                value <=> interval-value;
+                minimum: 1;
+                maximum: 999;
+            }
+            ComboBox {
+                model: ["minutos", "horas", "días"];
+                current-index <=> interval-unit-index;
+            }
+        }
+
+        Text { text: countdown-text; }
+
+        HorizontalLayout {
+            spacing: 8px;
+            Button {
+                text: paused ? "Reanudar" : "Pausar";
+                clicked => { toggle-pause(); }
+            }
+            Button {
+                text: "Cambiar ahora";
+                clicked => { change-now(); }
+            }
+        }
+
+        Button {
+            text: "Guardar";
+            clicked => { save(); }
+        }
+    }
+}
