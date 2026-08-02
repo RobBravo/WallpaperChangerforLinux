@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use wallpaper_core::config::{change_now_request_path, config_dir, Config};
 use wallpaper_core::kde_backend::KdePlasmaBackend;
-use wallpaper_core::monitors::list_connected_monitors;
+use wallpaper_core::monitors::{list_connected_monitors, Monitor};
 use wallpaper_core::state::{MonitorState, State};
 
 use engine::Engine;
@@ -68,15 +68,23 @@ fn apply_and_record<B: wallpaper_core::backend::WallpaperBackend>(
 
 fn run<B: wallpaper_core::backend::WallpaperBackend>(
     mut engine: Engine<B>,
+    initial_monitors: Vec<Monitor>,
     rx: Receiver<DaemonEvent>,
     state_path: std::path::PathBuf,
     change_now_request_path: std::path::PathBuf,
 ) -> anyhow::Result<()> {
-    let mut deadlines: HashMap<String, SystemTime> = HashMap::new();
-    // `main()` already fetched a fresh monitor list right before constructing `Engine`,
-    // so the first poll here would be redundant if it fired immediately - wait a full
-    // interval before the loop re-checks on its own.
-    let mut next_monitor_poll = SystemTime::now() + MONITOR_POLL_INTERVAL;
+    let now = SystemTime::now();
+    // Seed every monitor `engine` was already constructed with as immediately due, so
+    // a fresh, non-paused monitor gets its first wallpaper applied right at startup
+    // (matching this project's pre-multi-monitor behavior) instead of waiting for the
+    // hot-plug poll below - which exists to catch monitors that connect *after*
+    // startup, not to bootstrap the ones already known.
+    let mut deadlines: HashMap<String, SystemTime> =
+        initial_monitors.iter().map(|m| (m.uuid.clone(), now)).collect();
+    // The monitor list above is already fresh (`main()` fetched it moments ago), so
+    // the first *poll* only needs to catch monitors that connect after that - no need
+    // to immediately re-fetch and redo the work `initial_monitors` just seeded.
+    let mut next_monitor_poll = now + MONITOR_POLL_INTERVAL;
 
     loop {
         match rx.recv_timeout(TICK) {
@@ -169,13 +177,13 @@ fn main() -> anyhow::Result<()> {
         Config::default()
     });
     let monitors = list_connected_monitors().unwrap_or_default();
-    let engine = Engine::new(KdePlasmaBackend, config, monitors);
+    let engine = Engine::new(KdePlasmaBackend, config, monitors.clone());
 
     let (tx, rx) = channel::<DaemonEvent>();
     let _watcher = watcher::spawn_watcher(config_dir(), tx)?;
     tray::spawn_tray();
 
-    run(engine, rx, wallpaper_core::state::state_path(), change_now_request_path())
+    run(engine, monitors, rx, wallpaper_core::state::state_path(), change_now_request_path())
 }
 
 #[cfg(test)]
@@ -214,7 +222,7 @@ mod tests {
         let monitor = Monitor { uuid: "uuid-a".to_string(), connector: "uuid-a".to_string(), is_primary: true, x: 0, y: 0 };
         let config = Config { monitors: vec![monitor_config] };
         let calls = Arc::new(Mutex::new(Vec::new()));
-        let engine = Engine::new(RecordingBackend { calls: calls.clone() }, config, vec![monitor]);
+        let engine = Engine::new(RecordingBackend { calls: calls.clone() }, config, vec![monitor.clone()]);
 
         let (tx, rx) = channel();
         let config_dir = dir.path().to_path_buf();
@@ -223,7 +231,7 @@ mod tests {
 
         let change_now_request_path = config_dir.join("change_now_request");
         let handle = thread::spawn(move || {
-            let _ = run(engine, rx, state_path, change_now_request_path);
+            let _ = run(engine, vec![monitor], rx, state_path, change_now_request_path);
         });
 
         std::fs::write(config_dir.join("change_now_request"), b"uuid-a").unwrap();
