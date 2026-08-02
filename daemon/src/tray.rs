@@ -1,5 +1,6 @@
 use ksni::blocking::TrayMethods;
 use wallpaper_core::config::{change_now_request_path, Config};
+use wallpaper_core::monitors::list_connected_monitors;
 
 struct DaemonTray;
 
@@ -47,10 +48,28 @@ impl ksni::Tray for DaemonTray {
     }
 }
 
+/// The tray has no per-monitor UI of its own, so "Pausar/Reanudar" and "Cambiar
+/// ahora" act on the primary monitor as a stopgap - the GUI (with its own monitor
+/// selector) is the way to control a non-primary monitor.
+fn primary_monitor_uuid() -> Option<String> {
+    list_connected_monitors()
+        .ok()?
+        .into_iter()
+        .find(|m| m.is_primary)
+        .map(|m| m.uuid)
+}
+
 fn toggle_pause() {
+    let Some(uuid) = primary_monitor_uuid() else {
+        eprintln!("tray: no primary monitor detected, cannot toggle pause");
+        return;
+    };
     match Config::load() {
         Ok(mut config) => {
-            config.paused = !config.paused;
+            match config.monitors.iter_mut().find(|m| m.uuid == uuid) {
+                Some(monitor) => monitor.paused = !monitor.paused,
+                None => eprintln!("tray: primary monitor {uuid} has no config entry yet"),
+            }
             if let Err(e) = config.save() {
                 eprintln!("tray: failed to save config.toml: {e}");
             }
@@ -60,12 +79,11 @@ fn toggle_pause() {
 }
 
 fn request_change_now() {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-        .to_string();
-    if let Err(e) = std::fs::write(change_now_request_path(), now) {
+    let Some(uuid) = primary_monitor_uuid() else {
+        eprintln!("tray: no primary monitor detected, cannot request an immediate change");
+        return;
+    };
+    if let Err(e) = std::fs::write(change_now_request_path(), uuid) {
         eprintln!("tray: failed to write change_now_request: {e}");
     }
 }
