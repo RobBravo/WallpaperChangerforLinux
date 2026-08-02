@@ -14,33 +14,30 @@
 
 ## Monitor Identification
 
-KDE Plasma (via KScreen) assigns every physical monitor a stable UUID, independent of which port it's plugged into or the order multiple monitors were connected in. Confirmed on this project's development machine via `kscreen-doctor -o`:
+KDE Plasma (via KScreen/KWin) assigns every physical monitor a stable UUID, independent of which port it's plugged into or the order multiple monitors were connected in. Confirmed on this project's development machine:
 
-```
-Output: 1 LVDS-1 e01e245f-8f3a-496f-bb9f-d6a02c263502
-	enabled
-	connected
-	priority 1
-	...
-```
+This design combines two clean JSON sources rather than parsing decorated CLI text (an initial version of this design shelled out to `kscreen-doctor -o`'s human-readable output, but that output embeds ANSI color escape codes unconditionally — confirmed during research that they survive even when the command's stdout is piped to a non-terminal, e.g. `kscreen-doctor -o | cat -v` still shows raw `^[[01;32m` sequences — making it fragile to parse reliably):
 
-`org.kde.KScreen`'s D-Bus service exists but its object tree isn't straightforwardly introspectable (checked during design research — `busctl --user tree org.kde.KScreen` returns nothing usable), so this design uses `kscreen-doctor -o`'s plain-text output directly rather than reverse-engineering a private D-Bus schema. `kscreen-doctor` ships as part of `libkscreen`/`plasma-workspace`, present on every real KDE Plasma install this project already targets — this is the one place the project shells out to a system CLI instead of using D-Bus/`zbus`, a deliberate, scoped exception noted here so it isn't mistaken for an oversight later.
+1. **`kscreen-doctor --json`** (note: `--json` *without* `-o` — combining both flags appends the legacy colored text after the JSON block, which defeats the purpose) returns clean, structured JSON with one object per output, each including `connected: bool`, `name: string` (the connector name, e.g. `"LVDS-1"`), and `priority: number` (`1` for the primary display) — but *no* persistent UUID.
+2. **`~/.config/kwinoutputconfig.json`**, a plain JSON file KWin itself already maintains (confirmed present and populated on this project's development machine), is a JSON array whose entry with `"name": "outputs"` has a `"data"` array of per-monitor objects, each with `connectorName` and the same persistent `uuid` `kscreen-doctor -o`'s text output shows (verified identical UUID string across both sources on this machine: `e01e245f-8f3a-496f-bb9f-d6a02c263502` for connector `LVDS-1`). This file is read directly (`std::fs::read_to_string` + `serde_json`), not queried via any command.
 
-A new `wallpaper_core::monitors` module parses this output into:
+Cross-referencing both by connector name (`kscreen-doctor --json`'s `name` field ≡ `kwinoutputconfig.json`'s `connectorName` field) gives every currently-connected monitor's stable UUID with zero text-parsing fragility — both sources are well-formed JSON, parsed with `serde_json` (new dependency; this project already uses `serde`/`toml` for its own files, so this is a natural extension, not a new parsing paradigm). `kscreen-doctor` itself is still a real subprocess call (this remains the one place the project shells out to a system CLI instead of using D-Bus/`zbus` directly — `org.kde.KScreen`'s D-Bus service exists but its object tree isn't straightforwardly introspectable, confirmed via `busctl --user tree org.kde.KScreen` returning nothing usable during design research), but its output is now consumed as data, not scraped as decorated text.
+
+A new `wallpaper_core::monitors` module exposes:
 
 ```rust
 pub struct Monitor {
     pub uuid: String,
     pub connector: String,   // e.g. "LVDS-1" - informational only, not used as an identifier
-    pub is_primary: bool,    // true for the output with "priority 1"
+    pub is_primary: bool,    // true for the output with priority == 1
 }
 
 pub fn list_connected_monitors() -> anyhow::Result<Vec<Monitor>>;
 ```
 
-`is_primary` is derived from the `priority 1` line, not tracked separately anywhere in this project's own config — "which monitor is primary" always reflects whatever KDE's own display settings say, so it stays correct automatically if the user changes their primary display in System Settings.
+`is_primary` is derived from `kscreen-doctor --json`'s `priority` field, not tracked separately anywhere in this project's own config — "which monitor is primary" always reflects whatever KDE's own display settings say, so it stays correct automatically if the user changes their primary display in System Settings. A connected output with no matching entry in `kwinoutputconfig.json` (a monitor KWin has genuinely never configured before — rare, but possible on a brand-new connection before KWin has written its own config) is skipped from the returned list rather than erroring, since there is no stable UUID to assign it yet; it will appear on its next poll once KWin has persisted its own config for it (in practice this resolves within the same session, well before this project's 30-second poll cadence would notice a difference).
 
-**Mapping a UUID to a Plasma `desktops()` script target** (needed by the KDE backend to address the right screen) is an implementation-time detail: `desktops()[i].screen` gives a KWin screen index, and `kscreen-doctor -o`'s numeric `Output: <id> ...` prefix is a candidate correlation key, but the exact correspondence needs to be verified empirically against a real multi-monitor KDE session during implementation (this project's only test hardware during design research is a single-monitor laptop). This is flagged explicitly rather than guessed at.
+**Mapping a UUID to a Plasma `desktops()` script target** (needed by the KDE backend to address the right screen) is still an implementation-time detail: `desktops()[i].screen` gives a KWin screen index, and the connector name each monitor's `Monitor` struct already carries is a candidate correlation key (the Plasma scripting API may expose a way to read a screen's connector name directly, avoiding index-based guessing entirely), but the exact correspondence needs to be verified empirically against a real multi-monitor KDE session during implementation (this project's only test hardware during design research is a single-monitor laptop). This is flagged explicitly rather than guessed at.
 
 ## Config and State Schema
 
@@ -97,7 +94,7 @@ paused = false
 
 `daemon/src/engine.rs`'s `Engine` changes from owning one `WallpaperQueue` to owning one per connected monitor (`HashMap<String, WallpaperQueue>`, keyed by UUID), each independently tracking its own folder scan, shuffle state, and interval/pause (read from that monitor's own `MonitorConfig`). `apply_next`-equivalent logic runs per monitor: each connected monitor has its own deadline, and the main loop's `recv_timeout` waits for the *soonest* upcoming deadline across all monitors rather than a single global one.
 
-Monitor connect/disconnect is detected by re-running `list_connected_monitors()` on a fixed poll cadence (proposed: every 30 seconds, decoupled from any individual monitor's rotation interval) rather than waiting for a KScreen D-Bus signal — consistent with the "use the plain-text CLI, don't reverse-engineer a private D-Bus schema" decision above. A newly-connected UUID triggers the new-monitor-copies-primary behavior; a disconnected one is simply excluded from the next rotation cycle without touching its saved config.
+Monitor connect/disconnect is detected by re-running `list_connected_monitors()` on a fixed poll cadence (proposed: every 30 seconds, decoupled from any individual monitor's rotation interval) rather than waiting for a KScreen D-Bus signal — consistent with the "don't reverse-engineer a private D-Bus schema" decision above. A newly-connected UUID triggers the new-monitor-copies-primary behavior; a disconnected one is simply excluded from the next rotation cycle without touching its saved config.
 
 `core/src/kde_backend.rs`'s `KdePlasmaBackend::set_wallpaper` changes from a single-argument `(path)` call that loops over every `desktops()` entry, to something that also identifies *which* desktop to target for a given monitor UUID (exact mechanism per the "Monitor Identification" section's open implementation detail above).
 
@@ -112,7 +109,7 @@ Monitor connect/disconnect is detected by re-running `list_connected_monitors()`
 
 ## Testing
 
-- `wallpaper_core::monitors`'s output-parsing logic is pure text-in/struct-out and gets standard unit tests against captured sample `kscreen-doctor -o` output (including a single-monitor sample and a multi-monitor sample), following this project's established TDD conventions.
+- `wallpaper_core::monitors`'s parsing/cross-referencing logic is pure data-in/struct-out and gets standard unit tests against captured sample JSON (both a `kscreen-doctor --json` sample and a `kwinoutputconfig.json` sample, including single-monitor and multi-monitor cases, and a case where a connected output has no matching `kwinoutputconfig.json` entry), following this project's established TDD conventions.
 - `Config`'s migration-from-old-format logic gets unit tests: loading an old-format file produces the correct single-entry new-format `Config`, and the migrated form round-trips correctly when saved and reloaded.
 - `Engine`'s per-monitor queue/deadline logic is unit-testable the same way the current single-queue `Engine` already is (fake backend, temp directories) — extended to assert independence between monitors (rotating one doesn't affect another's queue state).
 - The KDE backend's actual per-desktop targeting (the open implementation-time question above) can only be verified against a real multi-monitor KDE Plasma session — this project's design-time research only had a single-monitor machine available, so this is manual verification, matching the project's existing precedent for D-Bus-integration code that can't be meaningfully mocked.
