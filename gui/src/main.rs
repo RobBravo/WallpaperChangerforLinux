@@ -68,15 +68,31 @@ fn refresh_state(ui: &AppWindow, shown_wallpaper: &RefCell<Option<PathBuf>>) {
 /// a close request fires the window is always visible, so this always hides it there.
 fn toggle_visibility(ui: &AppWindow) {
     let window = ui.window();
-    if window.is_visible() {
+    // A minimized window still reports `is_visible() == true`, so it is treated as
+    // "not in front of the user" here: toggling restores it instead of hiding it.
+    if window.is_visible() && !window.is_minimized() {
         let _ = window.hide();
     } else {
-        let _ = window.show();
+        show_and_restore(window);
     }
+}
+
+/// Brings the window back in front of the user. `show()` alone is not enough: a
+/// window minimized through the window manager is still "visible" as far as Slint
+/// is concerned, so it also has to be un-iconified explicitly.
+fn show_and_restore(window: &slint::Window) {
+    let _ = window.show();
+    window.set_minimized(false);
 }
 
 fn main() -> anyhow::Result<()> {
     let socket_path = gui_socket_path();
+    // On a fresh install the config directory doesn't exist yet (it's only created
+    // later, by `Config::save`), and binding the socket inside a missing directory
+    // fails - which would silently disable single-instance detection for this run.
+    if let Some(parent) = socket_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     let listener = match singleton::claim(&socket_path) {
         Ok(singleton::Singleton::AlreadyRunning) => {
             if let Err(e) = singleton::notify_running_instance(&socket_path) {
@@ -191,7 +207,7 @@ fn main() -> anyhow::Result<()> {
             // event loop thread, so touching `ui` has to be scheduled back onto it.
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = ui_handle.upgrade() {
-                    let _ = ui.window().show();
+                    show_and_restore(ui.window());
                 }
             });
         });
@@ -206,6 +222,13 @@ fn main() -> anyhow::Result<()> {
             std::time::Duration::from_secs(1),
             move || {
                 if let Some(ui) = ui_handle.upgrade() {
+                    // The process outlives its window now, so a hidden window would
+                    // otherwise keep re-reading config/state and decoding a full-size
+                    // wallpaper every second with nobody watching. The first tick after
+                    // it is shown again catches everything up.
+                    if !ui.window().is_visible() {
+                        return;
+                    }
                     refresh_state(&ui, &shown_wallpaper);
                 }
             },
