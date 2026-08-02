@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Wallpaper Changer
+Comment=Configura la rotación automática de fondos de pantalla
+Exec=@BINDIR@/wallpaper-changer-gui
+Icon=preferences-desktop-wallpaper
+Terminal=false
+Categories=Settings;DesktopSettings;

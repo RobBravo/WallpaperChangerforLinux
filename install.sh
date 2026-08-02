@@ -18,6 +18,10 @@ install -Dm755 target/release/wallpaper-changer-gui "$HOME/.local/bin/wallpaper-
 mkdir -p "$HOME/.config/systemd/user"
 cp packaging/wallpaper-changer-daemon.service "$HOME/.config/systemd/user/"
 
+mkdir -p "$HOME/.local/share/applications"
+sed "s|@BINDIR@|$HOME/.local/bin|" packaging/wallpaper-changer-gui.desktop \
+    > "$HOME/.local/share/applications/wallpaper-changer-gui.desktop"
+
 systemctl --user daemon-reload
 systemctl --user enable --now wallpaper-changer-daemon
 # `enable --now` is a no-op on an already-enabled unit, so restart explicitly to make
