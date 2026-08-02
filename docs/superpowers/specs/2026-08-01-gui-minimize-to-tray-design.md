@@ -16,10 +16,12 @@
 Three additions inside the `gui` crate only:
 
 1. **Single-instance module** (`gui/src/singleton.rs`) — claims or detects an existing instance via a Unix domain socket.
-2. **GUI tray icon** (`gui/src/tray.rs`) — a `ksni`-based tray icon, structurally similar to `daemon/src/tray.rs`, with a 2-item menu.
-3. **Window close interception** (in `gui/src/main.rs`) — hides the window instead of exiting the process when the user clicks the close button.
+2. **GUI tray icon** — a `SystemTrayIcon` component declared directly in a new `.slint` file, using Slint 1.17.1's built-in native tray support (`system-tray` Cargo feature, already on by default — no extra dependency needed). Slint's own Linux backend implements this via `ksni` internally, so there is no manual `ksni` usage, no extra OS thread, and no cross-thread `invoke_from_event_loop` plumbing for the menu: `SystemTrayIcon`'s `Menu`/`MenuItem` callbacks are dispatched on the same Slint event loop as the window.
+3. **Window close interception** (in `gui/src/main.rs`) — hides the window instead of exiting the process when the user clicks the close button, and keeps the event loop alive via `slint::run_event_loop_until_quit()` instead of the generated `AppWindow::run()` convenience method.
 
 `daemon` and `core` are untouched.
+
+**Deviation from the originally-approved sketch:** the design initially assumed a hand-rolled `ksni`-based tray (mirroring `daemon/src/tray.rs`) on its own OS thread. Researching Slint 1.17.1's actual API for this plan surfaced a native `SystemTrayIcon` component that covers the same requirement with less code and no manual threading — confirmed with the user before writing this plan. The trade-off: Slint's `SystemTrayIcon.icon` is a real `image` (rendered pixels), not a theme icon *name* like `ksni::Tray::icon_name()` — it cannot reuse the daemon's `"preferences-desktop-wallpaper"` string. This spec now bundles a small SVG icon asset instead (see GUI Tray Icon below).
 
 ## Single-Instance Protocol
 
@@ -52,20 +54,40 @@ pub fn claim(socket_path: &Path) -> anyhow::Result<Singleton>;
 
 ## GUI Tray Icon
 
-`gui/src/tray.rs` mirrors `daemon/src/tray.rs`'s structure: a unit struct implementing `ksni::Tray`, spawned via `ksni::blocking::TrayMethods::spawn` on its own OS thread (same pattern already established and working in the daemon, including the `default-features = false, features = ["blocking", "async-io"]` dependency configuration that keeps `tokio` out of the dependency tree).
+A new `gui/ui/tray-icon.slint` file defines a component inheriting `SystemTrayIcon`:
 
-- `icon_name()`: reuses `"preferences-desktop-wallpaper"` (same as the daemon's icon — both represent the same application).
-- Menu (2 items):
-  - **"Mostrar/Ocultar ventana"** — toggles window visibility via `invoke_from_event_loop` (same cross-thread pattern as the singleton listener thread).
-  - **"Salir"** — `std::process::exit(0)`, the only way the GUI process actually terminates once minimized.
+```slint
+export component GuiTray inherits SystemTrayIcon {
+    icon: @image-url("icons/tray-icon.svg");
+    tooltip: "Wallpaper Changer";
 
-The tray icon is created once, from the primary instance's startup path, and lives for the process's whole lifetime (per the approved design: always present while the GUI runs, not created/destroyed on minimize/restore).
+    callback toggle-visibility();
+    callback quit();
 
-## Window Close Interception
+    Menu {
+        MenuItem {
+            title: "Mostrar/Ocultar ventana";
+            activated => { toggle-visibility(); }
+        }
+        MenuItem {
+            title: "Salir";
+            activated => { quit(); }
+        }
+    }
+}
+```
 
-Slint's window-close-request callback (exact API name to be confirmed against the installed `slint = "1.17.1"` at implementation time, consistent with how this project has always handled minor API drift in fast-moving crates — see `kde_backend.rs`/`tray.rs`'s precedents) is wired to call `ui.hide()` (or equivalent) and return a "don't close" response, instead of letting the default handler exit the process.
+A small bundled SVG asset, `gui/ui/icons/tray-icon.svg`, is embedded at compile time via `@image-url` — `SystemTrayIcon.icon` is a real rendered image, not a theme icon name, so it can't reference `"preferences-desktop-wallpaper"` by string like the daemon's `ksni::Tray::icon_name()` does.
 
-Interaction with the tray icon's "Mostrar/Ocultar ventana": both code paths converge on the same show/hide logic, so a small shared helper (e.g., `fn toggle_visibility(ui: &AppWindow)` or two `show`/`hide` functions) is used by both the close-intercept and the tray menu instead of duplicating the visibility logic.
+`gui/src/main.rs` instantiates both `AppWindow::new()?` and `GuiTray::new()?`, wires `GuiTray`'s `toggle-visibility` callback to show the window if hidden or hide it if shown, and its `quit` callback to `slint::quit_event_loop()`. Both callbacks run on the Slint event loop thread (Slint's own dispatcher hands tray clicks to it), so no `Weak`/`invoke_from_event_loop` indirection is needed there — only the singleton listener thread (a genuine separate OS thread) needs it.
+
+The tray icon is created once at startup and lives for the process's whole lifetime (per the approved design: always present while the GUI runs, not created/destroyed on minimize/restore) — its instance is kept alive by binding it to a variable that outlives the event loop call, exactly like `ui`.
+
+## Window Close Interception and Event Loop
+
+`ui.window().on_close_requested(...)` is wired to hide the window and return `slint::CloseRequestResponse::HideWindow` — actually already the default response, but registering the callback explicitly documents the intent and is where the shared `toggle_visibility`/`hide` helper is called from, keeping window-hide logic in one place. The default `AppWindow::run()` convenience method cannot be used here — it internally runs the event loop configured to quit once the last window closes, which would still end the process the moment the window is hidden. Instead, `main()` calls `ui.show()?`, `tray.show()?`, then `slint::run_event_loop_until_quit()`, and only `slint::quit_event_loop()` (from the tray's "Salir") ends the loop.
+
+Both the close-intercept and the tray menu's "Mostrar/Ocultar ventana" converge on the same small helper (e.g., `fn toggle_visibility(ui: &AppWindow)`, checking `ui.window().is_visible()` to decide whether to call `.show()` or `.hide()`) instead of duplicating the show/hide logic.
 
 ## Error Handling
 
@@ -78,10 +100,10 @@ Interaction with the tray icon's "Mostrar/Ocultar ventana": both code paths conv
   - Claiming a fresh path returns `Singleton::Primary`.
   - Claiming the same path a second time (while the first `UnixListener` is still alive) returns `Singleton::AlreadyRunning`.
   - Writing `"show"` to a connected `AlreadyRunning`-detected socket is received by the primary's accept loop (assert on a channel the test's accept-loop stand-in signals, without needing a real Slint window).
-- The tray icon and window-hide/show behavior are verified manually (this project has no automated Slint UI tests anywhere — `gui/src/main.rs`'s existing callbacks are the established precedent), as part of the same kind of manual pass Task 12 already used: open the GUI, close it (confirm it minimizes, not exits), click the tray icon (confirm it restores), click "Abrir configuración" from the daemon's tray while the GUI is minimized (confirm it restores the existing window rather than opening a second one), click "Salir" from the GUI's own tray icon (confirm the process actually ends).
+- The tray icon and window-hide/show behavior are verified manually (this project has no automated Slint UI tests anywhere — `gui/src/main.rs`'s existing callbacks are the established precedent), as part of the same kind of manual pass Task 12 already used: open the GUI, close it (confirm it minimizes, not exits, and the tray icon appears), click the tray icon's "Mostrar/Ocultar ventana" (confirm it restores, then re-hides), click "Abrir configuración" from the daemon's tray while the GUI is minimized (confirm it restores the existing window rather than opening a second one), click "Salir" from the GUI's own tray icon (confirm the process actually ends and both the window and tray icon disappear).
 
 ## Out of Scope
 
 - No settings/toggle to disable close-to-tray behavior — it's always on, per the approved design.
-- No visual distinction between the daemon's and GUI's tray icons beyond their tooltips/titles — both reuse the same icon name.
+- No visual distinction between the daemon's and GUI's tray icons beyond their tooltips — the two are necessarily different image assets now (theme icon name vs. bundled SVG), but no further polish (e.g., dark/light variants) is in scope.
 - No changes to `daemon` or `core` — the daemon's existing "Abrir configuración" continues to work unmodified.
