@@ -18,12 +18,8 @@ impl State {
     }
 
     pub fn save_to(&self, path: &Path) -> anyhow::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         let text = toml::to_string_pretty(self)?;
-        std::fs::write(path, text)?;
-        Ok(())
+        crate::fs_util::atomic_write(path, &text)
     }
 
     pub fn load() -> anyhow::Result<State> {
