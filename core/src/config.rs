@@ -54,6 +54,10 @@ pub fn change_now_request_path() -> PathBuf {
     config_dir().join("change_now_request")
 }
 
+pub fn gui_socket_path() -> PathBuf {
+    config_dir().join("gui.sock")
+}
+
 impl Config {
     pub fn load_from(path: &Path) -> anyhow::Result<Config> {
         let text = std::fs::read_to_string(path)?;
