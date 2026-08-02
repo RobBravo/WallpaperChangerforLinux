@@ -9,6 +9,7 @@ gráfica simple para configurarlo.
 - Plataforma soportada: **KDE Plasma** únicamente (usa D-Bus y `org.kde.PlasmaShell`
   directamente). No funciona en GNOME, XFCE u otros escritorios.
 - Monitor único: no hay lógica de multi-monitor en esta versión.
+- Soporte multipantalla, GNOME y XFCE están planeados — ver [`ROADMAP.md`](ROADMAP.md).
 
 ---
 
