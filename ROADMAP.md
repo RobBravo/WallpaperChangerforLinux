@@ -22,12 +22,13 @@ resueltos. Bajo esfuerzo, bajo riesgo — tiene sentido cerrarlos antes de
 empezar features grandes sobre una base sin terminar de verificar.
 
 **Verificación pendiente del plan original (Task 14):**
-- [ ] Confirmar que el wallpaper **no** rota mientras el daemon está pausado
-      (nunca se re-verificó después del fix del bug de CPU).
+- [x] Confirmar que el wallpaper **no** rota mientras el daemon está pausado
+      (verificado en vivo: 2026-08-02).
 - [ ] Confirmar autoarranque real: cerrar sesión/reiniciar y ver que el
       daemon arranca solo, sin intervención manual.
-- [ ] Confirmar que vaciar la carpeta configurada no rompe el daemon (debe
-      loguear "no wallpapers found" y seguir corriendo).
+- [x] Confirmar que vaciar la carpeta configurada no rompe el daemon (debe
+      loguear "no wallpapers found" y seguir corriendo — verificado en vivo:
+      2026-08-02).
 
 **Deuda técnica aparcada en revisiones anteriores:**
 - [ ] Escrituras no atómicas en `config.toml`/`state.toml` (`core/src/config.rs`,
