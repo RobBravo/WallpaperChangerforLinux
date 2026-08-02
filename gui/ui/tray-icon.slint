@@ -1,0 +1,18 @@
+export component GuiTray inherits SystemTrayIcon {
+    icon: @image-url("icons/tray-icon.svg");
+    tooltip: "Wallpaper Changer";
+
+    callback toggle-visibility();
+    callback quit();
+
+    Menu {
+        MenuItem {
+            title: "Mostrar/Ocultar ventana";
+            activated => { toggle-visibility(); }
+        }
+        MenuItem {
+            title: "Salir";
+            activated => { quit(); }
+        }
+    }
+}
