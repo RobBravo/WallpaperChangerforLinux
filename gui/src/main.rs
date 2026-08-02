@@ -1,4 +1,5 @@
 slint::include_modules!();
+mod singleton;
 
 use std::cell::RefCell;
 use std::path::PathBuf;
