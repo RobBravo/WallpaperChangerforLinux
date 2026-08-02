@@ -31,22 +31,20 @@ empezar features grandes sobre una base sin terminar de verificar.
       2026-08-02).
 
 **Deuda técnica aparcada en revisiones anteriores:**
-- [ ] Escrituras no atómicas en `config.toml`/`state.toml` (`core/src/config.rs`,
-      `core/src/state.rs` usan `fs::write` directo) — un lector puede agarrar
-      un archivo a medio escribir. Ya lo vimos pasar una vez en los logs
-      reales. Arreglo: escribir a un archivo temporal y hacer `rename`.
-- [ ] Procesos zombie: `daemon/src/tray.rs:77` lanza la GUI con
-      `Command::spawn()` sin nunca esperar (`wait()`) el hijo. Cada vez que
-      "Abrir configuración" reutiliza una instancia ya abierta, el proceso
-      que delega y termina en milisegundos queda zombie hasta que el daemon
-      se reinicia.
-- [ ] Race de instancia única en la GUI (`gui/src/singleton.rs::claim`): dos
-      lanzamientos casi simultáneos pueden dejar la primera instancia
-      inalcanzable (su socket queda desvinculado por la segunda). Baja
-      probabilidad hoy porque nada dispara lanzamientos automáticos
-      concurrentes, pero vale la pena cerrarlo con `flock` o un socket de
-      espacio de nombres abstracto antes de que algo sí lo dispare
-      (por ejemplo, un `.desktop` file con autoarranque).
+- [x] Escrituras no atómicas en `config.toml`/`state.toml` — arreglado con
+      `wallpaper_core::fs_util::atomic_write` (escribe a un temporal y hace
+      `rename`). Verificado en vivo: toggles rápidos de pausa ya no producen
+      errores de parseo (2026-08-02).
+- [x] Procesos zombie al reutilizar una instancia de la GUI ya abierta —
+      arreglado con `reap_in_background` en `daemon/src/tray.rs`. Verificado
+      en vivo: 8 relanzamientos rápidos, cero zombies (2026-08-02).
+- [x] Race de instancia única en la GUI — arreglado con un `flock` exclusivo
+      y no bloqueante (`std::fs::File::try_lock`, sin dependencias nuevas).
+      Verificado en vivo: recuperación limpia tras un crash simulado
+      (2026-08-02).
+- [x] Archivo `.desktop` para lanzar la GUI desde el menú de aplicaciones —
+      agregado (`packaging/wallpaper-changer-gui.desktop`, instalado por
+      `install.sh` con la ruta real sustituida).
 - [ ] No existe archivo `.desktop` para lanzar la GUI desde el menú de
       aplicaciones — el spec original lo mencionaba, nunca se implementó.
 
