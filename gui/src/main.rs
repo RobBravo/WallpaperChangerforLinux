@@ -1,11 +1,12 @@
 slint::include_modules!();
+
 mod singleton;
 
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use wallpaper_core::config::{change_now_request_path, Config, IntervalUnit};
+use wallpaper_core::config::{change_now_request_path, gui_socket_path, Config, IntervalUnit};
 use wallpaper_core::state::State;
 
 fn unit_to_index(unit: IntervalUnit) -> i32 {
@@ -62,8 +63,42 @@ fn refresh_state(ui: &AppWindow, shown_wallpaper: &RefCell<Option<PathBuf>>) {
     ui.set_countdown_text(format!("Próximo cambio en {hours:02}:{minutes:02}:{seconds:02}").into());
 }
 
+/// Shows the window if it's hidden, hides it if it's visible. Shared by the tray
+/// menu's "Mostrar/Ocultar ventana" and the window's own close button - by the time
+/// a close request fires the window is always visible, so this always hides it there.
+fn toggle_visibility(ui: &AppWindow) {
+    let window = ui.window();
+    if window.is_visible() {
+        let _ = window.hide();
+    } else {
+        let _ = window.show();
+    }
+}
+
 fn main() -> anyhow::Result<()> {
+    let socket_path = gui_socket_path();
+    let listener = match singleton::claim(&socket_path) {
+        Ok(singleton::Singleton::AlreadyRunning) => {
+            if let Err(e) = singleton::notify_running_instance(&socket_path) {
+                eprintln!("gui: failed to notify the running instance: {e}");
+            }
+            return Ok(());
+        }
+        Ok(singleton::Singleton::Primary(listener)) => Some(listener),
+        Err(e) => {
+            // Single-instance detection is a convenience, not a hard requirement -
+            // its failure (e.g. a permissions problem on the config dir) must never
+            // block the GUI from opening.
+            eprintln!("gui: single-instance detection unavailable, continuing anyway: {e}");
+            None
+        }
+    };
+
     let ui = AppWindow::new()?;
+    // Kept alive for the whole process lifetime: per Slint's docs, a SystemTrayIcon's
+    // icon appears as soon as the instance exists and disappears when it's dropped -
+    // there's no explicit show() call for it, unlike the window.
+    let tray = GuiTray::new()?;
     let config = Config::load()?;
 
     ui.set_folder_path(config.folder.display().to_string().into());
@@ -125,6 +160,43 @@ fn main() -> anyhow::Result<()> {
         }
     });
 
+    ui.window().on_close_requested({
+        let ui_handle = ui.as_weak();
+        move || {
+            if let Some(ui) = ui_handle.upgrade() {
+                toggle_visibility(&ui);
+            }
+            slint::CloseRequestResponse::HideWindow
+        }
+    });
+
+    tray.on_toggle_visibility({
+        let ui_handle = ui.as_weak();
+        move || {
+            if let Some(ui) = ui_handle.upgrade() {
+                toggle_visibility(&ui);
+            }
+        }
+    });
+
+    tray.on_quit(move || {
+        let _ = slint::quit_event_loop();
+    });
+
+    if let Some(listener) = listener {
+        let ui_handle = ui.as_weak();
+        singleton::spawn_accept_loop(listener, move || {
+            let ui_handle = ui_handle.clone();
+            // `spawn_accept_loop`'s callback runs on its own OS thread, not the Slint
+            // event loop thread, so touching `ui` has to be scheduled back onto it.
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = ui_handle.upgrade() {
+                    let _ = ui.window().show();
+                }
+            });
+        });
+    }
+
     let timer = slint::Timer::default();
     {
         let ui_handle = ui.as_weak();
@@ -140,6 +212,12 @@ fn main() -> anyhow::Result<()> {
         );
     }
 
-    ui.run()?;
+    // Not `ui.run()`: that convenience method runs the event loop configured to quit
+    // as soon as the last window closes, which would end the process the moment the
+    // window is hidden. `run_event_loop_until_quit` only stops at `quit_event_loop()`
+    // (wired to the tray's "Salir" above), so hiding the window just leaves the tray
+    // icon behind.
+    ui.show()?;
+    slint::run_event_loop_until_quit()?;
     Ok(())
 }
