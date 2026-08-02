@@ -98,6 +98,8 @@ paused = false
 
 Monitor connect/disconnect is detected by re-running `list_connected_monitors()` on a fixed poll cadence (proposed: every 30 seconds, decoupled from any individual monitor's rotation interval) rather than waiting for a KScreen D-Bus signal — consistent with the "don't reverse-engineer a private D-Bus schema" decision above. A newly-connected UUID triggers the new-monitor-copies-primary behavior; a disconnected one is simply excluded from the next rotation cycle without touching its saved config.
 
+A `ChangeNowRequested` event (the watcher noticing `change_now_request` changed) makes the daemon read that file's content — now a monitor UUID, per the GUI Changes section above — and force an immediate rotation for that one monitor only, leaving every other monitor's own deadline untouched.
+
 `wallpaper_core::backend::WallpaperBackend`'s trait method changes from `set_wallpaper(&self, path: &Path)` to `set_wallpaper(&self, all_monitors: &[Monitor], target: &Monitor, path: &Path)`: `target` identifies which monitor this call is for, `all_monitors` (the full currently-connected list) is what lets the backend compute *where* `target` ranks among them positionally.
 
 `core/src/kde_backend.rs`'s `KdePlasmaBackend::set_wallpaper` then: sorts `all_monitors` by `(y, x)` (top-to-bottom, then left-to-right — matching typical multi-monitor reading order) to find `target`'s rank, and generates a script that sorts `desktops()` the same way and writes only to the desktop at that same rank:
@@ -120,7 +122,9 @@ if (d) {
 
 ## GUI Changes
 
-`gui/ui/app-window.slint`'s single form becomes one tab per *connected* monitor (Slint's `TabWidget`, from `std-widgets.slint`, is the natural fit — same family of widget this project already imports `Button`/`ComboBox`/`SpinBox`/`LineEdit` from). Each tab is the existing form (folder picker, interval, preview image, countdown, pause/change-now/save) unchanged in its own layout — only wrapped in a per-monitor context instead of operating on one global `Config`. `gui/src/main.rs` reads all monitors' config/state, populates one tab per connected monitor, and each tab's callbacks (`choose-folder`, `toggle-pause`, `change-now`, `save`) operate on that tab's own `MonitorConfig` entry within the shared `Config` list rather than the whole file.
+`gui/ui/app-window.slint`'s single form becomes one tab per *connected* monitor (Slint's `TabWidget`, from `std-widgets.slint`, is the natural fit — same family of widget this project already imports `Button`/`ComboBox`/`SpinBox`/`LineEdit` from). Each tab is the existing form (folder picker, interval, preview image, countdown, pause/change-now/save) unchanged in its own layout — only wrapped in a per-monitor context instead of operating on one global `Config`. `gui/src/main.rs` reads all monitors' config/state, populates one tab per connected monitor, and each tab's callbacks (`choose-folder`, `toggle-pause`, `save`) operate on that tab's own `MonitorConfig` entry within the shared `Config` list rather than the whole file.
+
+**`change-now` needs to target one monitor, not all of them** — each tab has its own button, and clicking it should only force an immediate rotation on *that* tab's monitor, consistent with every other per-tab control. The shared `change_now_request` file's *content* becomes the target monitor's UUID (previously just a timestamp, whose value the daemon never actually read — only the file's modification was the signal). `wallpaper_core::config::change_now_request_path()` itself is unchanged; only what gets written to it changes. The daemon's handling (see "Daemon Changes" below) reads that UUID after the file-changed signal fires and applies it to that one monitor only.
 
 ## Error Handling
 
