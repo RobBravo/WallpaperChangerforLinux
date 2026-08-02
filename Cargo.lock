@@ -5395,6 +5395,7 @@ dependencies = [
  "rfd",
  "slint",
  "slint-build",
+ "tempfile",
  "wallpaper-core",
 ]
 
