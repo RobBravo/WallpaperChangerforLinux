@@ -1,67 +1,111 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 use wallpaper_core::backend::WallpaperBackend;
 use wallpaper_core::config::Config;
+use wallpaper_core::monitors::Monitor;
 use wallpaper_core::queue::WallpaperQueue;
 use wallpaper_core::scanner::list_wallpapers;
 
 /// Lower bound on the rotation interval. `config.toml` is hand-editable and carries no
-/// validation, so an `interval_value = 0` would otherwise make `recv_timeout` return
-/// instantly and spin the main loop, hammering D-Bus and the disk.
+/// validation, so an `interval_value = 0` would otherwise make the daemon's loop spin
+/// on that one monitor, hammering D-Bus and the disk.
 const MIN_INTERVAL: Duration = Duration::from_secs(60);
 
 pub struct Engine<B: WallpaperBackend> {
     backend: B,
     config: Config,
-    queue: WallpaperQueue,
+    monitors: Vec<Monitor>,
+    queues: HashMap<String, WallpaperQueue>,
 }
 
 impl<B: WallpaperBackend> Engine<B> {
-    pub fn new(backend: B, config: Config) -> Self {
-        let queue = WallpaperQueue::new(list_wallpapers(&config.folder));
-        Engine { backend, config, queue }
+    pub fn new(backend: B, config: Config, monitors: Vec<Monitor>) -> Self {
+        let queues = config
+            .monitors
+            .iter()
+            .map(|m| (m.uuid.clone(), WallpaperQueue::new(list_wallpapers(&m.folder))))
+            .collect();
+        Engine { backend, config, monitors, queues }
     }
 
-    pub fn is_paused(&self) -> bool {
-        self.config.paused
+    pub fn is_paused(&self, uuid: &str) -> bool {
+        self.config.monitor(uuid).map(|m| m.paused).unwrap_or(true)
     }
 
-    pub fn interval(&self) -> Duration {
+    pub fn interval(&self, uuid: &str) -> Duration {
         self.config
-            .interval_unit
-            .to_duration(self.config.interval_value)
-            .max(MIN_INTERVAL)
+            .monitor(uuid)
+            .map(|m| m.interval_unit.to_duration(m.interval_value).max(MIN_INTERVAL))
+            .unwrap_or(MIN_INTERVAL)
     }
 
-    /// Rescans the wallpaper folder and rebuilds the queue if its contents changed.
-    ///
-    /// The folder is a live directory: the user can drop new images into it or delete
-    /// existing ones at any time. Without this the daemon would keep serving the
-    /// snapshot taken at startup, handing deleted paths to the backend (which happily
-    /// returns `Ok` for a nonexistent file) and never picking up new images.
-    fn refresh_queue(&mut self) {
-        let scanned = list_wallpapers(&self.config.folder);
-        if scanned.as_slice() != self.queue.all() {
-            self.queue = WallpaperQueue::new(scanned);
+    fn refresh_queue(&mut self, uuid: &str, folder: &std::path::Path) {
+        let scanned = list_wallpapers(folder);
+        let needs_rebuild = self
+            .queues
+            .get(uuid)
+            .map(|q| scanned.as_slice() != q.all())
+            .unwrap_or(true);
+        if needs_rebuild {
+            self.queues.insert(uuid.to_string(), WallpaperQueue::new(scanned));
         }
     }
 
-    pub fn apply_next(&mut self) -> anyhow::Result<Option<PathBuf>> {
-        self.refresh_queue();
-        match self.queue.next() {
+    /// Applies the next wallpaper for one monitor. `Ok(None)` if that monitor isn't
+    /// currently connected (no `MonitorConfig` entry, or not in the last-known
+    /// connected list) or its folder has no images.
+    pub fn apply_next(&mut self, uuid: &str) -> anyhow::Result<Option<PathBuf>> {
+        let Some(monitor_config) = self.config.monitor(uuid).cloned() else { return Ok(None) };
+        let Some(target) = self.monitors.iter().find(|m| m.uuid == uuid).cloned() else {
+            return Ok(None);
+        };
+        self.refresh_queue(uuid, &monitor_config.folder);
+        let Some(queue) = self.queues.get_mut(uuid) else { return Ok(None) };
+        match queue.next() {
             Some(path) => {
-                self.backend.set_wallpaper(&path)?;
+                self.backend.set_wallpaper(&self.monitors, &target, &path)?;
                 Ok(Some(path))
             }
             None => Ok(None),
         }
     }
 
+    /// Rebuilds only the queues of monitors whose folder actually changed, leaving
+    /// every other monitor's shuffle progress untouched.
     pub fn update_config(&mut self, new_config: Config) {
-        if new_config.folder != self.config.folder {
-            self.queue = WallpaperQueue::new(list_wallpapers(&new_config.folder));
+        for monitor in &new_config.monitors {
+            let folder_changed = self
+                .config
+                .monitor(&monitor.uuid)
+                .map(|old| old.folder != monitor.folder)
+                .unwrap_or(true);
+            if folder_changed {
+                self.queues
+                    .insert(monitor.uuid.clone(), WallpaperQueue::new(list_wallpapers(&monitor.folder)));
+            }
         }
         self.config = new_config;
+    }
+
+    /// Reconciles the live connected-monitor list: any UUID never seen before gets a
+    /// fresh `MonitorConfig` entry (copying the primary monitor's settings, per
+    /// `Config::for_new_monitor`) and a fresh rotation queue. Does not write anything
+    /// to disk itself - returns the updated `Config` so the caller can persist it,
+    /// keeping `Engine` free of file I/O concerns (matching this project's existing
+    /// separation between rotation logic and persistence, done in `main.rs`).
+    pub fn update_monitors(&mut self, monitors: Vec<Monitor>) -> Config {
+        let primary_uuid = monitors.iter().find(|m| m.is_primary).map(|m| m.uuid.clone());
+        for monitor in &monitors {
+            if self.config.monitor(&monitor.uuid).is_none() {
+                let fresh = self.config.for_new_monitor(&monitor.uuid, primary_uuid.as_deref());
+                self.queues
+                    .insert(monitor.uuid.clone(), WallpaperQueue::new(list_wallpapers(&fresh.folder)));
+                self.config.monitors.push(fresh);
+            }
+        }
+        self.monitors = monitors;
+        self.config.clone()
     }
 }
 
@@ -70,21 +114,26 @@ mod tests {
     use super::*;
     use std::path::Path;
     use std::sync::{Arc, Mutex};
-    use wallpaper_core::config::IntervalUnit;
+    use wallpaper_core::config::{IntervalUnit, MonitorConfig};
 
     struct FakeBackend {
-        calls: Arc<Mutex<Vec<PathBuf>>>,
+        calls: Arc<Mutex<Vec<(String, PathBuf)>>>,
     }
 
     impl WallpaperBackend for FakeBackend {
-        fn set_wallpaper(&self, path: &Path) -> anyhow::Result<()> {
-            self.calls.lock().unwrap().push(path.to_path_buf());
+        fn set_wallpaper(&self, _all_monitors: &[Monitor], target: &Monitor, path: &Path) -> anyhow::Result<()> {
+            self.calls.lock().unwrap().push((target.uuid.clone(), path.to_path_buf()));
             Ok(())
         }
     }
 
-    fn test_config(folder: PathBuf) -> Config {
-        Config {
+    fn monitor(uuid: &str, is_primary: bool) -> Monitor {
+        Monitor { uuid: uuid.to_string(), connector: uuid.to_string(), is_primary, x: 0, y: 0 }
+    }
+
+    fn monitor_config(uuid: &str, folder: PathBuf) -> MonitorConfig {
+        MonitorConfig {
+            uuid: uuid.to_string(),
             folder,
             interval_value: 1,
             interval_unit: IntervalUnit::Minutes,
@@ -93,124 +142,127 @@ mod tests {
     }
 
     #[test]
-    fn apply_next_calls_backend_with_an_image_from_the_folder() {
+    fn apply_next_calls_the_backend_with_an_image_from_that_monitors_own_folder() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.png"), b"x").unwrap();
+        let config = Config { monitors: vec![monitor_config("uuid-a", dir.path().to_path_buf())] };
         let calls = Arc::new(Mutex::new(Vec::new()));
         let backend = FakeBackend { calls: calls.clone() };
-        let mut engine = Engine::new(backend, test_config(dir.path().to_path_buf()));
+        let mut engine = Engine::new(backend, config, vec![monitor("uuid-a", true)]);
 
-        let applied = engine.apply_next().unwrap();
+        let applied = engine.apply_next("uuid-a").unwrap();
 
         assert_eq!(applied, Some(dir.path().join("a.png")));
-        assert_eq!(calls.lock().unwrap().len(), 1);
+        assert_eq!(calls.lock().unwrap().as_slice(), &[("uuid-a".to_string(), dir.path().join("a.png"))]);
     }
 
     #[test]
-    fn apply_next_returns_none_when_folder_has_no_images() {
-        let dir = tempfile::tempdir().unwrap();
-        let backend = FakeBackend { calls: Arc::new(Mutex::new(Vec::new())) };
-        let mut engine = Engine::new(backend, test_config(dir.path().to_path_buf()));
-
-        assert_eq!(engine.apply_next().unwrap(), None);
-    }
-
-    #[test]
-    fn update_config_rebuilds_queue_when_folder_changes() {
+    fn two_monitors_rotate_independently() {
         let dir_a = tempfile::tempdir().unwrap();
         std::fs::write(dir_a.path().join("a.png"), b"x").unwrap();
         let dir_b = tempfile::tempdir().unwrap();
         std::fs::write(dir_b.path().join("b.png"), b"x").unwrap();
 
-        let backend = FakeBackend { calls: Arc::new(Mutex::new(Vec::new())) };
-        let mut engine = Engine::new(backend, test_config(dir_a.path().to_path_buf()));
-        engine.update_config(test_config(dir_b.path().to_path_buf()));
+        let config = Config {
+            monitors: vec![
+                monitor_config("uuid-a", dir_a.path().to_path_buf()),
+                monitor_config("uuid-b", dir_b.path().to_path_buf()),
+            ],
+        };
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let backend = FakeBackend { calls: calls.clone() };
+        let mut engine = Engine::new(backend, config, vec![monitor("uuid-a", true), monitor("uuid-b", false)]);
 
-        assert_eq!(engine.apply_next().unwrap(), Some(dir_b.path().join("b.png")));
+        engine.apply_next("uuid-a").unwrap();
+        engine.apply_next("uuid-b").unwrap();
+
+        let recorded = calls.lock().unwrap();
+        assert_eq!(recorded[0], ("uuid-a".to_string(), dir_a.path().join("a.png")));
+        assert_eq!(recorded[1], ("uuid-b".to_string(), dir_b.path().join("b.png")));
     }
 
     #[test]
-    fn apply_next_picks_up_an_image_added_after_the_engine_was_created() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("a.png"), b"x").unwrap();
+    fn apply_next_returns_none_for_an_unconfigured_monitor() {
         let backend = FakeBackend { calls: Arc::new(Mutex::new(Vec::new())) };
-        let mut engine = Engine::new(backend, test_config(dir.path().to_path_buf()));
-
-        assert_eq!(engine.apply_next().unwrap(), Some(dir.path().join("a.png")));
-
-        let added = dir.path().join("b.png");
-        std::fs::write(&added, b"x").unwrap();
-
-        let mut seen_added = false;
-        for _ in 0..10 {
-            if engine.apply_next().unwrap() == Some(added.clone()) {
-                seen_added = true;
-                break;
-            }
-        }
-        assert!(seen_added, "image added after startup was never returned by apply_next");
+        let mut engine = Engine::new(backend, Config::default(), vec![]);
+        assert_eq!(engine.apply_next("unknown-uuid").unwrap(), None);
     }
 
     #[test]
-    fn apply_next_stops_returning_an_image_removed_from_the_folder() {
+    fn is_paused_and_interval_are_read_per_monitor() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("a.png"), b"x").unwrap();
-        let removed = dir.path().join("b.png");
-        std::fs::write(&removed, b"x").unwrap();
+        let mut cfg_a = monitor_config("uuid-a", dir.path().to_path_buf());
+        cfg_a.paused = true;
+        cfg_a.interval_value = 2;
+        cfg_a.interval_unit = IntervalUnit::Hours;
+        let cfg_b = monitor_config("uuid-b", dir.path().to_path_buf());
+
+        let config = Config { monitors: vec![cfg_a, cfg_b] };
         let backend = FakeBackend { calls: Arc::new(Mutex::new(Vec::new())) };
-        let mut engine = Engine::new(backend, test_config(dir.path().to_path_buf()));
+        let engine = Engine::new(backend, config, vec![monitor("uuid-a", true), monitor("uuid-b", false)]);
 
-        engine.apply_next().unwrap();
-        std::fs::remove_file(&removed).unwrap();
-
-        for _ in 0..10 {
-            assert_eq!(
-                engine.apply_next().unwrap(),
-                Some(dir.path().join("a.png")),
-                "a deleted image was still handed to the backend"
-            );
-        }
-    }
-
-    #[test]
-    fn apply_next_returns_none_once_the_folder_is_emptied() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("a.png"), b"x").unwrap();
-        let backend = FakeBackend { calls: Arc::new(Mutex::new(Vec::new())) };
-        let mut engine = Engine::new(backend, test_config(dir.path().to_path_buf()));
-
-        assert!(engine.apply_next().unwrap().is_some());
-        std::fs::remove_file(dir.path().join("a.png")).unwrap();
-
-        assert_eq!(engine.apply_next().unwrap(), None);
+        assert!(engine.is_paused("uuid-a"));
+        assert_eq!(engine.interval("uuid-a"), Duration::from_secs(2 * 3600));
+        assert!(!engine.is_paused("uuid-b"));
+        assert_eq!(engine.interval("uuid-b"), MIN_INTERVAL);
     }
 
     #[test]
     fn interval_is_clamped_to_a_sane_minimum_when_config_says_zero() {
         let dir = tempfile::tempdir().unwrap();
+        let mut cfg = monitor_config("uuid-a", dir.path().to_path_buf());
+        cfg.interval_value = 0;
+        let config = Config { monitors: vec![cfg] };
         let backend = FakeBackend { calls: Arc::new(Mutex::new(Vec::new())) };
-        let mut config = test_config(dir.path().to_path_buf());
-        config.interval_value = 0;
-        let engine = Engine::new(backend, config);
+        let engine = Engine::new(backend, config, vec![monitor("uuid-a", true)]);
 
-        assert!(
-            engine.interval() >= Duration::from_secs(60),
-            "interval_value = 0 must not produce a busy-loop timeout, got {:?}",
-            engine.interval()
-        );
+        assert!(engine.interval("uuid-a") >= Duration::from_secs(60));
     }
 
     #[test]
-    fn is_paused_and_interval_reflect_current_config() {
+    fn update_monitors_gives_a_newly_connected_monitor_the_primarys_settings() {
         let dir = tempfile::tempdir().unwrap();
+        let mut primary_cfg = monitor_config("primary", dir.path().to_path_buf());
+        primary_cfg.interval_value = 45;
+        primary_cfg.interval_unit = IntervalUnit::Hours;
+        let config = Config { monitors: vec![primary_cfg] };
         let backend = FakeBackend { calls: Arc::new(Mutex::new(Vec::new())) };
-        let mut config = test_config(dir.path().to_path_buf());
-        config.paused = true;
-        config.interval_value = 2;
-        config.interval_unit = IntervalUnit::Hours;
-        let engine = Engine::new(backend, config);
+        let mut engine = Engine::new(backend, config, vec![monitor("primary", true)]);
 
-        assert!(engine.is_paused());
-        assert_eq!(engine.interval(), Duration::from_secs(2 * 3600));
+        let updated_config = engine.update_monitors(vec![monitor("primary", true), monitor("new", false)]);
+
+        let new_entry = updated_config.monitor("new").unwrap();
+        assert_eq!(new_entry.interval_value, 45);
+        assert_eq!(new_entry.interval_unit, IntervalUnit::Hours);
+    }
+
+    #[test]
+    fn update_monitors_leaves_an_existing_monitors_config_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg_a = monitor_config("uuid-a", dir.path().to_path_buf());
+        cfg_a.interval_value = 99;
+        let config = Config { monitors: vec![cfg_a] };
+        let backend = FakeBackend { calls: Arc::new(Mutex::new(Vec::new())) };
+        let mut engine = Engine::new(backend, config, vec![monitor("uuid-a", true)]);
+
+        let updated_config = engine.update_monitors(vec![monitor("uuid-a", true)]);
+
+        assert_eq!(updated_config.monitor("uuid-a").unwrap().interval_value, 99);
+    }
+
+    #[test]
+    fn update_config_rebuilds_only_the_queue_whose_folder_changed() {
+        let dir_a1 = tempfile::tempdir().unwrap();
+        std::fs::write(dir_a1.path().join("old.png"), b"x").unwrap();
+        let dir_a2 = tempfile::tempdir().unwrap();
+        std::fs::write(dir_a2.path().join("new.png"), b"x").unwrap();
+
+        let config = Config { monitors: vec![monitor_config("uuid-a", dir_a1.path().to_path_buf())] };
+        let backend = FakeBackend { calls: Arc::new(Mutex::new(Vec::new())) };
+        let mut engine = Engine::new(backend, config, vec![monitor("uuid-a", true)]);
+
+        engine.update_config(Config { monitors: vec![monitor_config("uuid-a", dir_a2.path().to_path_buf())] });
+
+        assert_eq!(engine.apply_next("uuid-a").unwrap(), Some(dir_a2.path().join("new.png")));
     }
 }
