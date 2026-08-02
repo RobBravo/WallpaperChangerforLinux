@@ -58,6 +58,10 @@ pub fn gui_socket_path() -> PathBuf {
     config_dir().join("gui.sock")
 }
 
+pub fn gui_lock_path() -> PathBuf {
+    config_dir().join("gui.lock")
+}
+
 impl Config {
     pub fn load_from(path: &Path) -> anyhow::Result<Config> {
         let text = std::fs::read_to_string(path)?;

@@ -6,7 +6,7 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use wallpaper_core::config::{change_now_request_path, gui_socket_path, Config, IntervalUnit};
+use wallpaper_core::config::{change_now_request_path, gui_lock_path, gui_socket_path, Config, IntervalUnit};
 use wallpaper_core::state::State;
 
 fn unit_to_index(unit: IntervalUnit) -> i32 {
@@ -87,26 +87,27 @@ fn show_and_restore(window: &slint::Window) {
 
 fn main() -> anyhow::Result<()> {
     let socket_path = gui_socket_path();
+    let lock_path = gui_lock_path();
     // On a fresh install the config directory doesn't exist yet (it's only created
     // later, by `Config::save`), and binding the socket inside a missing directory
     // fails - which would silently disable single-instance detection for this run.
     if let Some(parent) = socket_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let listener = match singleton::claim(&socket_path) {
+    let (listener, _lock_file) = match singleton::claim(&socket_path, &lock_path) {
         Ok(singleton::Singleton::AlreadyRunning) => {
             if let Err(e) = singleton::notify_running_instance(&socket_path) {
                 eprintln!("gui: failed to notify the running instance: {e}");
             }
             return Ok(());
         }
-        Ok(singleton::Singleton::Primary(listener)) => Some(listener),
+        Ok(singleton::Singleton::Primary(listener, lock_file)) => (Some(listener), Some(lock_file)),
         Err(e) => {
             // Single-instance detection is a convenience, not a hard requirement -
             // its failure (e.g. a permissions problem on the config dir) must never
             // block the GUI from opening.
             eprintln!("gui: single-instance detection unavailable, continuing anyway: {e}");
-            None
+            (None, None)
         }
     };
 

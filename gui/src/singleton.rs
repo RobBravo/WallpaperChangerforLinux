@@ -1,3 +1,4 @@
+use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
@@ -5,39 +6,30 @@ use std::path::Path;
 const SHOW_MESSAGE: &[u8; 4] = b"show";
 
 pub enum Singleton {
-    Primary(UnixListener),
+    Primary(UnixListener, File),
     AlreadyRunning,
 }
 
-/// Claims `socket_path` as the single running instance, or detects that another
-/// instance already holds it.
+/// Claims `socket_path` as the single running instance, coordinated through an
+/// exclusive, non-blocking `flock` on `lock_path`.
 ///
-/// A stale socket file left behind by a process that didn't exit cleanly (e.g. a
-/// crash) would otherwise make every future launch see `AlreadyRunning` forever
-/// with nothing actually listening, so the path is cleared before binding fresh -
-/// `UnixListener::bind` fails with `AddrInUse` if a file already exists there.
-///
-/// Only `ConnectionRefused` (the file is there but nothing is listening: the
-/// definitive stale signal) and `NotFound` (nothing there at all, so removing is a
-/// no-op) are treated as safe to reclaim. Any other connect error - a permissions
-/// problem, a descriptor limit - says nothing about whether a healthy primary is
-/// alive, so its socket file is left alone and the bind is simply attempted.
-pub fn claim(socket_path: &Path) -> anyhow::Result<Singleton> {
-    match UnixStream::connect(socket_path) {
-        Ok(_) => return Ok(Singleton::AlreadyRunning),
-        Err(e)
-            if matches!(
-                e.kind(),
-                std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
-            ) =>
-        {
-            let _ = std::fs::remove_file(socket_path);
-        }
-        Err(_) => {}
+/// The lock - not the socket file - is the source of truth for "is a primary
+/// instance alive": a `flock` is released by the kernel the instant the process
+/// holding it exits, for any reason, including a crash. That removes the race a
+/// plain connect-then-bind approach has (two processes launched close enough
+/// together can both see "nobody's listening" and both try to become primary), and
+/// it also makes stale-socket cleanup unconditionally safe - once this process
+/// holds the lock exclusively, nothing else can possibly be listening on
+/// `socket_path`, so any file left there is guaranteed dead and safe to remove.
+pub fn claim(socket_path: &Path, lock_path: &Path) -> anyhow::Result<Singleton> {
+    let lock_file = OpenOptions::new().create(true).write(true).open(lock_path)?;
+    if lock_file.try_lock().is_err() {
+        return Ok(Singleton::AlreadyRunning);
     }
 
+    let _ = std::fs::remove_file(socket_path);
     let listener = UnixListener::bind(socket_path)?;
-    Ok(Singleton::Primary(listener))
+    Ok(Singleton::Primary(listener, lock_file))
 }
 
 /// Tells the already-running primary instance to show its window.
@@ -82,13 +74,17 @@ mod tests {
     use std::sync::mpsc::{channel, RecvTimeoutError};
     use std::time::Duration;
 
+    fn paths(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+        (dir.join("gui.sock"), dir.join("gui.lock"))
+    }
+
     #[test]
     fn claiming_a_fresh_path_becomes_the_primary_instance() {
         let dir = tempfile::tempdir().unwrap();
-        let socket_path = dir.path().join("gui.sock");
+        let (socket_path, lock_path) = paths(dir.path());
 
-        match claim(&socket_path).unwrap() {
-            Singleton::Primary(_listener) => {}
+        match claim(&socket_path, &lock_path).unwrap() {
+            Singleton::Primary(_listener, _lock_file) => {}
             Singleton::AlreadyRunning => panic!("expected Primary for a fresh socket path"),
         }
     }
@@ -96,23 +92,41 @@ mod tests {
     #[test]
     fn claiming_an_already_claimed_path_detects_the_running_instance() {
         let dir = tempfile::tempdir().unwrap();
-        let socket_path = dir.path().join("gui.sock");
+        let (socket_path, lock_path) = paths(dir.path());
 
-        let _primary = claim(&socket_path).unwrap();
+        let _primary = claim(&socket_path, &lock_path).unwrap();
 
-        match claim(&socket_path).unwrap() {
+        match claim(&socket_path, &lock_path).unwrap() {
             Singleton::AlreadyRunning => {}
-            Singleton::Primary(_) => panic!("expected AlreadyRunning while the primary is alive"),
+            Singleton::Primary(..) => panic!("expected AlreadyRunning while the primary is alive"),
+        }
+    }
+
+    #[test]
+    fn dropping_the_primary_releases_the_lock_for_the_next_claim() {
+        let dir = tempfile::tempdir().unwrap();
+        let (socket_path, lock_path) = paths(dir.path());
+
+        let primary = claim(&socket_path, &lock_path).unwrap();
+        drop(primary);
+
+        match claim(&socket_path, &lock_path).unwrap() {
+            Singleton::Primary(..) => {}
+            Singleton::AlreadyRunning => {
+                panic!("expected Primary after the previous primary's lock was released")
+            }
         }
     }
 
     #[test]
     fn claiming_a_path_with_a_stale_socket_file_recovers_and_becomes_primary() {
         let dir = tempfile::tempdir().unwrap();
-        let socket_path = dir.path().join("gui.sock");
+        let (socket_path, lock_path) = paths(dir.path());
 
         // Dropping a `UnixListener` closes the socket but leaves its file on disk -
-        // exactly what a crashed primary instance leaves behind.
+        // exactly what a crashed primary instance leaves behind. Crucially, its lock
+        // is also released by the crash (simulated here by simply never taking it),
+        // so a fresh `claim` must recover cleanly.
         let dead = UnixListener::bind(&socket_path).unwrap();
         drop(dead);
         assert!(
@@ -120,8 +134,8 @@ mod tests {
             "expected the dropped listener to leave a stale socket file behind"
         );
 
-        match claim(&socket_path).unwrap() {
-            Singleton::Primary(_listener) => {}
+        match claim(&socket_path, &lock_path).unwrap() {
+            Singleton::Primary(..) => {}
             Singleton::AlreadyRunning => {
                 panic!("expected Primary after recovering a stale socket file")
             }
@@ -131,10 +145,10 @@ mod tests {
     #[test]
     fn notifying_the_primary_reaches_its_accept_loop() {
         let dir = tempfile::tempdir().unwrap();
-        let socket_path = dir.path().join("gui.sock");
+        let (socket_path, lock_path) = paths(dir.path());
 
-        let listener = match claim(&socket_path).unwrap() {
-            Singleton::Primary(listener) => listener,
+        let listener = match claim(&socket_path, &lock_path).unwrap() {
+            Singleton::Primary(listener, _lock_file) => listener,
             Singleton::AlreadyRunning => panic!("expected to become the primary instance"),
         };
 
@@ -152,10 +166,10 @@ mod tests {
     #[test]
     fn a_short_or_unrecognized_message_is_ignored() {
         let dir = tempfile::tempdir().unwrap();
-        let socket_path = dir.path().join("gui.sock");
+        let (socket_path, lock_path) = paths(dir.path());
 
-        let listener = match claim(&socket_path).unwrap() {
-            Singleton::Primary(listener) => listener,
+        let listener = match claim(&socket_path, &lock_path).unwrap() {
+            Singleton::Primary(listener, _lock_file) => listener,
             Singleton::AlreadyRunning => panic!("expected to become the primary instance"),
         };
 
