@@ -5,7 +5,10 @@ import { Button, ComboBox, SpinBox, LineEdit } from "std-widgets.slint";
 export component AppWindow inherits Window {
     title: "Wallpaper Changer";
     width: 420px;
-    height: 480px;
+    height: 520px;
+
+    in property <[string]> monitor-labels;
+    in-out property <int> selected-monitor-index: 0;
 
     in property <image> preview-image;
     in-out property <string> folder-path;
@@ -14,6 +17,7 @@ export component AppWindow inherits Window {
     in property <string> countdown-text: "";
     in property <bool> paused: false;
 
+    callback monitor-selected();
     callback choose-folder();
     callback toggle-pause();
     callback change-now();
@@ -22,6 +26,13 @@ export component AppWindow inherits Window {
     VerticalLayout {
         padding: 16px;
         spacing: 12px;
+
+        Text { text: "Monitor"; }
+        ComboBox {
+            model: monitor-labels;
+            current-index <=> selected-monitor-index;
+            selected => { monitor-selected(); }
+        }
 
         Image {
             source: preview-image;
