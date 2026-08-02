@@ -70,12 +70,26 @@ fn request_change_now() {
     }
 }
 
+/// Spawns a background thread that waits for `child` to exit, so the OS can reap it
+/// instead of leaving a zombie process behind once it exits. `Command::spawn` returns
+/// a `Child` that is never awaited otherwise - and on this project's fast path (the
+/// GUI's own single-instance guard makes most launches here exit within
+/// milliseconds, having only delegated to an already-running instance), that would
+/// mean a zombie left behind on every click of "Abrir configuración" while the GUI
+/// is already open, for as long as the daemon keeps running.
+fn reap_in_background(mut child: std::process::Child) {
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+}
+
 fn open_config_gui() {
     let path = dirs::home_dir()
         .map(|home| home.join(".local/bin/wallpaper-changer-gui"))
         .unwrap_or_else(|| std::path::PathBuf::from("wallpaper-changer-gui"));
-    if let Err(e) = std::process::Command::new(path).spawn() {
-        eprintln!("tray: failed to launch wallpaper-changer-gui: {e}");
+    match std::process::Command::new(path).spawn() {
+        Ok(child) => reap_in_background(child),
+        Err(e) => eprintln!("tray: failed to launch wallpaper-changer-gui: {e}"),
     }
 }
 
@@ -91,4 +105,26 @@ pub fn spawn_tray() {
             eprintln!("tray: failed to start system tray icon: {e}");
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn reap_in_background_waits_for_the_child_so_it_does_not_stay_a_zombie() {
+        let child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id();
+
+        reap_in_background(child);
+
+        // give the reaper thread time to call wait()
+        std::thread::sleep(Duration::from_millis(300));
+
+        // once a child is reaped, the kernel removes its /proc entry entirely -
+        // a zombie (unreaped-but-exited) child would still have one, with State: Z
+        let proc_entry_exists = std::path::Path::new(&format!("/proc/{pid}")).exists();
+        assert!(!proc_entry_exists, "child process {pid} was not reaped (zombie left behind)");
+    }
 }
