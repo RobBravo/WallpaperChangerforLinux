@@ -45,8 +45,6 @@ empezar features grandes sobre una base sin terminar de verificar.
 - [x] Archivo `.desktop` para lanzar la GUI desde el menú de aplicaciones —
       agregado (`packaging/wallpaper-changer-gui.desktop`, instalado por
       `install.sh` con la ruta real sustituida).
-- [ ] No existe archivo `.desktop` para lanzar la GUI desde el menú de
-      aplicaciones — el spec original lo mencionaba, nunca se implementó.
 
 **Esfuerzo estimado:** un par de horas de trabajo real + verificación manual.
 
