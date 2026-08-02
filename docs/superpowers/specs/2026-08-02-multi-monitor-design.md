@@ -30,6 +30,8 @@ pub struct Monitor {
     pub uuid: String,
     pub connector: String,   // e.g. "LVDS-1" - informational only, not used as an identifier
     pub is_primary: bool,    // true for the output with priority == 1
+    pub x: i32,               // physical position, from kscreen-doctor's `pos.x`/`pos.y` -
+    pub y: i32,               // used only to correlate with a Plasma `desktops()` entry (below)
 }
 
 pub fn list_connected_monitors() -> anyhow::Result<Vec<Monitor>>;
@@ -37,7 +39,7 @@ pub fn list_connected_monitors() -> anyhow::Result<Vec<Monitor>>;
 
 `is_primary` is derived from `kscreen-doctor --json`'s `priority` field, not tracked separately anywhere in this project's own config — "which monitor is primary" always reflects whatever KDE's own display settings say, so it stays correct automatically if the user changes their primary display in System Settings. A connected output with no matching entry in `kwinoutputconfig.json` (a monitor KWin has genuinely never configured before — rare, but possible on a brand-new connection before KWin has written its own config) is skipped from the returned list rather than erroring, since there is no stable UUID to assign it yet; it will appear on its next poll once KWin has persisted its own config for it (in practice this resolves within the same session, well before this project's 30-second poll cadence would notice a difference).
 
-**Mapping a UUID to a Plasma `desktops()` script target** (needed by the KDE backend to address the right screen) is still an implementation-time detail: `desktops()[i].screen` gives a KWin screen index, and the connector name each monitor's `Monitor` struct already carries is a candidate correlation key (the Plasma scripting API may expose a way to read a screen's connector name directly, avoiding index-based guessing entirely), but the exact correspondence needs to be verified empirically against a real multi-monitor KDE session during implementation (this project's only test hardware during design research is a single-monitor laptop). This is flagged explicitly rather than guessed at.
+**Mapping a UUID to a Plasma `desktops()` script target** (needed by the KDE backend to address the right screen) was flagged as an open implementation-time question in an earlier version of this design. It's now resolved by research into how others have solved the identical problem: the Plasma scripting API's `Desktop` objects have no hardware/connector identifier at all (confirmed — KDE's own scripting API provides no stable per-screen ID), but `screenGeometry(d.screen)` exposes each desktop's physical `.left`/`.top` position, and `kscreen-doctor --json`'s `pos.x`/`pos.y` (now carried on `Monitor`, above) gives the same physical position from the Rust side. Sorting both lists by position (top, then left) and matching by index correlates a `Monitor` to its `desktops()` entry reliably, without guessing at index ordering or reverse-engineering anything undocumented — this is the same strategy an existing published solution to per-monitor KDE wallpapers uses. See the "KDE Backend" subsection under "Daemon Changes" below for the concrete script shape.
 
 ## Config and State Schema
 
@@ -96,7 +98,25 @@ paused = false
 
 Monitor connect/disconnect is detected by re-running `list_connected_monitors()` on a fixed poll cadence (proposed: every 30 seconds, decoupled from any individual monitor's rotation interval) rather than waiting for a KScreen D-Bus signal — consistent with the "don't reverse-engineer a private D-Bus schema" decision above. A newly-connected UUID triggers the new-monitor-copies-primary behavior; a disconnected one is simply excluded from the next rotation cycle without touching its saved config.
 
-`core/src/kde_backend.rs`'s `KdePlasmaBackend::set_wallpaper` changes from a single-argument `(path)` call that loops over every `desktops()` entry, to something that also identifies *which* desktop to target for a given monitor UUID (exact mechanism per the "Monitor Identification" section's open implementation detail above).
+`wallpaper_core::backend::WallpaperBackend`'s trait method changes from `set_wallpaper(&self, path: &Path)` to `set_wallpaper(&self, all_monitors: &[Monitor], target: &Monitor, path: &Path)`: `target` identifies which monitor this call is for, `all_monitors` (the full currently-connected list) is what lets the backend compute *where* `target` ranks among them positionally.
+
+`core/src/kde_backend.rs`'s `KdePlasmaBackend::set_wallpaper` then: sorts `all_monitors` by `(y, x)` (top-to-bottom, then left-to-right — matching typical multi-monitor reading order) to find `target`'s rank, and generates a script that sorts `desktops()` the same way and writes only to the desktop at that same rank:
+
+```js
+var sorted = desktops().filter(function(d) { return d.screen != -1; }).sort(function(a, b) {
+    var ga = screenGeometry(a.screen), gb = screenGeometry(b.screen);
+    if (ga.top !== gb.top) return ga.top - gb.top;
+    return ga.left - gb.left;
+});
+var d = sorted[{rank}];
+if (d) {
+    d.wallpaperPlugin = "org.kde.image";
+    d.currentConfigGroup = Array("Wallpaper", "org.kde.image", "General");
+    d.writeConfig("Image", "file://{path}");
+}
+```
+
+`{rank}` is computed in Rust (position of `target` within `all_monitors` sorted the same way) and `{path}` goes through the same JS-string escaping this project's `kde_backend.rs` already has (`escape_js_string`, unchanged). The `if (d)` guard makes a rank that's momentarily out of bounds (e.g. a monitor disconnected between this project's own connected-monitor poll and the script actually running) a silent no-op rather than a script error. Each monitor is set independently, one `evaluateScript` call per rotation, matching the per-monitor independent rotation timing described under "Daemon Changes" — this does mean every call re-sorts and re-queries `desktops()`/`screenGeometry()` fresh (cheap, a handful of JS objects) rather than batching all monitors into one script call.
 
 ## GUI Changes
 
@@ -112,7 +132,7 @@ Monitor connect/disconnect is detected by re-running `list_connected_monitors()`
 - `wallpaper_core::monitors`'s parsing/cross-referencing logic is pure data-in/struct-out and gets standard unit tests against captured sample JSON (both a `kscreen-doctor --json` sample and a `kwinoutputconfig.json` sample, including single-monitor and multi-monitor cases, and a case where a connected output has no matching `kwinoutputconfig.json` entry), following this project's established TDD conventions.
 - `Config`'s migration-from-old-format logic gets unit tests: loading an old-format file produces the correct single-entry new-format `Config`, and the migrated form round-trips correctly when saved and reloaded.
 - `Engine`'s per-monitor queue/deadline logic is unit-testable the same way the current single-queue `Engine` already is (fake backend, temp directories) — extended to assert independence between monitors (rotating one doesn't affect another's queue state).
-- The KDE backend's actual per-desktop targeting (the open implementation-time question above) can only be verified against a real multi-monitor KDE Plasma session — this project's design-time research only had a single-monitor machine available, so this is manual verification, matching the project's existing precedent for D-Bus-integration code that can't be meaningfully mocked.
+- The KDE backend's position-based rank computation (sorting `all_monitors`, finding `target`'s index) is pure Rust logic and gets standard unit tests, matching this project's existing precedent for `build_wallpaper_script` (`core/src/kde_backend.rs`'s existing tests already verify script string content without a live Plasma session). Only the actual `desktops().sort(...)` JS logic executing correctly against a real multi-monitor KWin session (i.e., that KWin's `screenGeometry()` ordering genuinely agrees with `kscreen-doctor`'s `pos` ordering in practice) needs manual verification — this project's design-time research only had a single-monitor machine available.
 - Hot-plug behavior (new-monitor-copies-primary, disconnected-monitor-preserved) is manually verified on real hardware by physically connecting/disconnecting a monitor, for the same reason.
 
 ## Out of Scope
