@@ -10,6 +10,13 @@ pub struct KdePlasmaBackend;
 /// contain `"`, `\`, or (on Linux) even a newline. Interpolating those raw into the
 /// Plasma shell script would break the literal or let a crafted filename inject
 /// arbitrary Plasma scripting code.
+///
+/// U+2028 (LINE SEPARATOR) and U+2029 (PARAGRAPH SEPARATOR) get their own arms
+/// because `char::is_control()` doesn't consider them control characters (they're
+/// category Zl/Zp, not Cc) even though ECMAScript treats them as `LineTerminator`s -
+/// on a JS engine that hasn't adopted the ES2019 relaxation permitting them raw
+/// inside string literals, either one would terminate the literal early, same as an
+/// unescaped `\n` would.
 fn escape_js_string(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for c in input.chars() {
@@ -19,6 +26,8 @@ fn escape_js_string(input: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
+            '\u{2028}' => out.push_str("\\u2028"),
+            '\u{2029}' => out.push_str("\\u2029"),
             c if c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
             c => out.push(c),
         }
@@ -106,6 +115,22 @@ mod tests {
         assert!(script.contains(r"a\\b"), "script was: {script}");
         assert!(script.contains(r"b\nc.png"), "script was: {script}");
         assert!(!script.contains("b\nc.png"));
+    }
+
+    #[test]
+    fn unicode_line_and_paragraph_separators_in_the_path_are_escaped() {
+        let line_sep = '\u{2028}';
+        let para_sep = '\u{2029}';
+        let raw_path = format!("/home/user/a{line_sep}b{para_sep}c.png");
+        let script = build_wallpaper_script(0, &PathBuf::from(raw_path));
+
+        assert!(script.contains(r"a\u2028b"), "script was: {script}");
+        assert!(script.contains(r"b\u2029c.png"), "script was: {script}");
+        // the raw separators must not reach the script body: some JS engines treat
+        // U+2028/U+2029 as line terminators even inside a double-quoted string
+        // literal, which would end the literal early just like an unescaped `\n`
+        assert!(!script.contains(&format!("a{line_sep}b")));
+        assert!(!script.contains(&format!("b{para_sep}c.png")));
     }
 
     #[test]
