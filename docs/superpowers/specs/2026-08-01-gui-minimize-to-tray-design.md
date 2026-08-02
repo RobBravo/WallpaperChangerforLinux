@@ -7,7 +7,7 @@
 ## Global Constraints (inherited from the base design)
 
 - The daemon and GUI remain fully decoupled: they communicate only through the shared files under `~/.config/wallpaper-changer/` (`config.toml`, `state.toml`, `change_now_request`), resolved via `wallpaper_core::config`/`wallpaper_core::state` helper functions — never hardcoded paths. This spec adds one more such shared runtime file (`gui.sock`), following the same convention.
-- `daemon/src/tray.rs` and `core/` are **not modified** by this feature. `open_config_gui()` keeps spawning the GUI binary exactly as it does today; the GUI binary itself decides whether to become the visible instance or delegate to an already-running one.
+- `daemon/src/tray.rs` is **not modified** by this feature. `open_config_gui()` keeps spawning the GUI binary exactly as it does today; the GUI binary itself decides whether to become the visible instance or delegate to an already-running one. `core/` gains exactly one small addition — a `gui_socket_path()` helper in `core/src/config.rs`, alongside the existing `config_path()`/`change_now_request_path()` — following the codebase's established one-helper-per-runtime-file pattern rather than inlining `.join("gui.sock")` at call sites. No other part of `core/` changes.
 - Add third-party dependencies with `cargo add <crate> [--features ...]` rather than hand-writing version numbers.
 - KDE Plasma only, single monitor only — consistent with the rest of the project.
 
