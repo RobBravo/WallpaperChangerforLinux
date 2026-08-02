@@ -22,9 +22,15 @@ pub enum Singleton {
 /// holds the lock exclusively, nothing else can possibly be listening on
 /// `socket_path`, so any file left there is guaranteed dead and safe to remove.
 pub fn claim(socket_path: &Path, lock_path: &Path) -> anyhow::Result<Singleton> {
-    let lock_file = OpenOptions::new().create(true).write(true).open(lock_path)?;
-    if lock_file.try_lock().is_err() {
-        return Ok(Singleton::AlreadyRunning);
+    let lock_file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(lock_path)?;
+    match lock_file.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => return Ok(Singleton::AlreadyRunning),
+        Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
     }
 
     let _ = std::fs::remove_file(socket_path);
