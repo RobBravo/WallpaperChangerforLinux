@@ -8,3 +8,4 @@ pub mod backend;
 pub mod kde_backend;
 pub mod monitors;
 pub mod gnome_backend;
+pub mod xfce_backend;
