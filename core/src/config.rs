@@ -87,6 +87,15 @@ impl Config {
         }
     }
 
+    fn migration_list_monitors(
+        env: Option<crate::desktop::DesktopEnvironment>,
+    ) -> fn() -> anyhow::Result<Vec<crate::monitors::Monitor>> {
+        match env {
+            Some(crate::desktop::DesktopEnvironment::Gnome) => crate::monitors::list_gnome_monitors,
+            _ => crate::monitors::list_connected_monitors,
+        }
+    }
+
     fn from_legacy(legacy: LegacyConfig, uuid: String) -> Config {
         Config {
             monitors: vec![MonitorConfig {
@@ -114,12 +123,15 @@ impl Config {
     /// single-folder format.
     ///
     /// Migration needs to know which monitor to assign the old settings to (the old
-    /// format has no UUID), so it asks
-    /// `wallpaper_core::monitors::list_connected_monitors()` for whichever monitor is
-    /// currently primary. If that fails (e.g. `kscreen-doctor` isn't installed) or no
-    /// monitor is connected, migration is skipped for now and an empty config is
-    /// used instead - the old file on disk is left untouched unless migration
-    /// actually succeeds, so a later successful detection can retry it.
+    /// format has no UUID), so it asks whichever monitor-listing function matches the
+    /// currently detected desktop environment (`list_gnome_monitors` under GNOME,
+    /// `list_connected_monitors` otherwise - the same KDE-vs-GNOME decision as
+    /// `select_backend` in the daemon and `monitor_source` in the GUI, via
+    /// `migration_list_monitors`) for whichever monitor is currently primary. If that
+    /// fails (e.g. `kscreen-doctor` isn't installed) or no monitor is connected,
+    /// migration is skipped for now and an empty config is used instead - the old file
+    /// on disk is left untouched unless migration actually succeeds, so a later
+    /// successful detection can retry it.
     pub fn load() -> anyhow::Result<Config> {
         let path = config_path();
         if !path.exists() {
@@ -140,7 +152,8 @@ impl Config {
             // fatal" policy.
             return Ok(Config::default());
         };
-        let Some(primary_uuid) = crate::monitors::list_connected_monitors()
+        let list_monitors = Config::migration_list_monitors(crate::desktop::detect_desktop_environment());
+        let Some(primary_uuid) = list_monitors()
             .ok()
             .and_then(|monitors| monitors.into_iter().find(|m| m.is_primary).map(|m| m.uuid))
         else {
@@ -242,6 +255,46 @@ mod tests {
         assert_eq!(fresh.interval_value, 30);
         assert_eq!(fresh.interval_unit, IntervalUnit::Minutes);
         assert!(!fresh.paused);
+    }
+
+    /// Regression test for the whole-branch review finding that `Config::load()`'s
+    /// legacy-config migration hardcoded `list_connected_monitors()` (KDE-only), so
+    /// under GNOME it always failed to find a primary monitor and silently discarded
+    /// the user's real settings in favor of `Config::default()`. `detect_from_value`
+    /// reads the real `$XDG_CURRENT_DESKTOP` env var, which other tests in this crate
+    /// may race on if mutated directly, so this instead exercises
+    /// `migration_list_monitors` (the exact decision `load()` now delegates to) in
+    /// isolation with an explicit `DesktopEnvironment::Gnome`, proving migration would
+    /// resolve to GNOME's single shared-desktop UUID rather than falling through to
+    /// `Config::default()`.
+    #[test]
+    fn migration_list_monitors_resolves_the_gnome_shared_desktop_uuid_as_primary() {
+        let list_monitors = Config::migration_list_monitors(Some(crate::desktop::DesktopEnvironment::Gnome));
+
+        let primary_uuid = list_monitors()
+            .unwrap()
+            .into_iter()
+            .find(|m| m.is_primary)
+            .map(|m| m.uuid);
+
+        assert_eq!(primary_uuid.as_deref(), Some(crate::monitors::GNOME_SHARED_MONITOR_UUID));
+    }
+
+    /// Companion to the test above: KDE (and an undetected desktop) must still resolve
+    /// to `list_connected_monitors`, unchanged from this fix.
+    #[test]
+    fn migration_list_monitors_falls_back_to_kde_listing_for_non_gnome() {
+        let kde = Config::migration_list_monitors(Some(crate::desktop::DesktopEnvironment::Kde));
+        let undetected = Config::migration_list_monitors(None);
+
+        assert_eq!(
+            kde as *const () as usize,
+            crate::monitors::list_connected_monitors as *const () as usize
+        );
+        assert_eq!(
+            undetected as *const () as usize,
+            crate::monitors::list_connected_monitors as *const () as usize
+        );
     }
 
     #[test]
