@@ -161,9 +161,10 @@ fn run<B: wallpaper_core::backend::WallpaperBackend>(
         if now >= next_monitor_poll {
             match list_connected_monitors() {
                 Ok(monitors) => {
-                    let updated_config = engine.update_monitors(monitors.clone());
-                    if let Err(e) = updated_config.save() {
-                        eprintln!("failed to persist config.toml after a monitor change: {e}");
+                    if let Some(updated_config) = engine.update_monitors(monitors.clone()) {
+                        if let Err(e) = updated_config.save() {
+                            eprintln!("failed to persist config.toml after a monitor change: {e}");
+                        }
                     }
                     let connected: HashSet<String> = monitors.iter().map(|m| m.uuid.clone()).collect();
                     deadlines.retain(|uuid, _| connected.contains(uuid));

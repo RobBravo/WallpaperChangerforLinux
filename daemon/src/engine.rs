@@ -91,21 +91,32 @@ impl<B: WallpaperBackend> Engine<B> {
     /// Reconciles the live connected-monitor list: any UUID never seen before gets a
     /// fresh `MonitorConfig` entry (copying the primary monitor's settings, per
     /// `Config::for_new_monitor`) and a fresh rotation queue. Does not write anything
-    /// to disk itself - returns the updated `Config` so the caller can persist it,
-    /// keeping `Engine` free of file I/O concerns (matching this project's existing
-    /// separation between rotation logic and persistence, done in `main.rs`).
-    pub fn update_monitors(&mut self, monitors: Vec<Monitor>) -> Config {
+    /// to disk itself - returns `Some(Config)` for the caller to persist only when a
+    /// monitor was actually added, `None` when the connected set didn't introduce
+    /// anything new to `self.config` (keeping `Engine` free of file I/O concerns,
+    /// matching this project's existing separation between rotation logic and
+    /// persistence, done in `main.rs`).
+    ///
+    /// The `None` case matters: the caller polls this every 30 seconds regardless of
+    /// whether anything changed, and persisting an unconditional `self.config.clone()`
+    /// every cycle made every poll indistinguishable from a genuine edit to the
+    /// filesystem watcher - found during live testing to both churn config.toml
+    /// needlessly and risk clobbering an in-flight migration or a GUI save that landed
+    /// mid-poll with stale in-memory data.
+    pub fn update_monitors(&mut self, monitors: Vec<Monitor>) -> Option<Config> {
         let primary_uuid = monitors.iter().find(|m| m.is_primary).map(|m| m.uuid.clone());
+        let mut added_a_monitor = false;
         for monitor in &monitors {
             if self.config.monitor(&monitor.uuid).is_none() {
                 let fresh = self.config.for_new_monitor(&monitor.uuid, primary_uuid.as_deref());
                 self.queues
                     .insert(monitor.uuid.clone(), WallpaperQueue::new(list_wallpapers(&fresh.folder)));
                 self.config.monitors.push(fresh);
+                added_a_monitor = true;
             }
         }
         self.monitors = monitors;
-        self.config.clone()
+        added_a_monitor.then(|| self.config.clone())
     }
 }
 
@@ -229,11 +240,33 @@ mod tests {
         let backend = FakeBackend { calls: Arc::new(Mutex::new(Vec::new())) };
         let mut engine = Engine::new(backend, config, vec![monitor("primary", true)]);
 
-        let updated_config = engine.update_monitors(vec![monitor("primary", true), monitor("new", false)]);
+        let updated_config = engine
+            .update_monitors(vec![monitor("primary", true), monitor("new", false)])
+            .expect("a new monitor connected, so a Config to persist was expected");
 
         let new_entry = updated_config.monitor("new").unwrap();
         assert_eq!(new_entry.interval_value, 45);
         assert_eq!(new_entry.interval_unit, IntervalUnit::Hours);
+    }
+
+    /// Regression test: the 30-second hot-plug poll calls `update_monitors` on every
+    /// cycle regardless of whether anything actually changed. Persisting `None`'s
+    /// absence (rather than unconditionally re-saving `self.config` every cycle) is
+    /// what lets `main.rs` skip a needless config.toml re-save when the connected set
+    /// is unchanged - found necessary during Task 9's live testing: an unconditional
+    /// re-save every 30s made every reload look like a genuine edit to the watcher,
+    /// and (before this fix) could overwrite an in-flight migration or a GUI save that
+    /// landed mid-poll with stale in-memory data.
+    #[test]
+    fn update_monitors_returns_none_when_nothing_new_connects() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config { monitors: vec![monitor_config("uuid-a", dir.path().to_path_buf())] };
+        let backend = FakeBackend { calls: Arc::new(Mutex::new(Vec::new())) };
+        let mut engine = Engine::new(backend, config, vec![monitor("uuid-a", true)]);
+
+        let updated_config = engine.update_monitors(vec![monitor("uuid-a", true)]);
+
+        assert!(updated_config.is_none(), "no new monitor connected, so nothing should need persisting");
     }
 
     #[test]
@@ -245,9 +278,9 @@ mod tests {
         let backend = FakeBackend { calls: Arc::new(Mutex::new(Vec::new())) };
         let mut engine = Engine::new(backend, config, vec![monitor("uuid-a", true)]);
 
-        let updated_config = engine.update_monitors(vec![monitor("uuid-a", true)]);
+        let updated_config = engine.update_monitors(vec![monitor("uuid-a", true), monitor("new", false)]);
 
-        assert_eq!(updated_config.monitor("uuid-a").unwrap().interval_value, 99);
+        assert_eq!(updated_config.unwrap().monitor("uuid-a").unwrap().interval_value, 99);
     }
 
     #[test]
