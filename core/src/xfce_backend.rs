@@ -36,6 +36,31 @@ fn fallback_property_for_monitor(monitor_id: &str) -> String {
     format!("/backdrop/screen0/monitor{monitor_id}/workspace0/last-image")
 }
 
+/// Builds the argument list for one `xfconf-query -c xfce4-desktop ...` write, without
+/// running anything - kept pure and separate from the actual `Command` so it's
+/// directly testable, matching this project's existing split in `gnome_backend.rs`'s
+/// `gsettings_args` between building a command's arguments and running it.
+///
+/// `is_fallback` must be `true` only when `property` is the freshly-synthesized
+/// `fallback_property_for_monitor` path rather than one already returned by
+/// `last_image_properties_for_monitor`'s `-l` listing. `xfconf-query -s` refuses to
+/// write a property that doesn't already exist in the channel unless also given
+/// `-n`/`--create` and `-t`/`--type` - confirmed against XFCE's own documented CLI
+/// behavior - so only the fallback case needs those two extra flags; a property found
+/// via `-l` is already known to exist and must NOT be passed `-n` (creating an
+/// already-existing property is not what `-n` is for and needlessly changes the
+/// command XFCE itself would have used).
+fn xfconf_write_args(property: &str, is_fallback: bool) -> Vec<String> {
+    let mut args = vec!["-c".to_string(), "xfce4-desktop".to_string(), "-p".to_string(), property.to_string()];
+    if is_fallback {
+        args.push("-n".to_string());
+        args.push("-t".to_string());
+        args.push("string".to_string());
+    }
+    args.push("-s".to_string());
+    args
+}
+
 impl WallpaperBackend for XfceBackend {
     /// `all_monitors` is unused: XFCE's xfconf property paths are already
     /// monitor-specific by construction, unlike KDE's position-based correlation
@@ -53,7 +78,12 @@ impl WallpaperBackend for XfceBackend {
         let listing = String::from_utf8(output.stdout)?;
 
         let mut properties = last_image_properties_for_monitor(&listing, &target.uuid);
-        if properties.is_empty() {
+        // Tracks whether `properties` holds already-existing paths (found via `-l`) or
+        // the single freshly-synthesized fallback path pushed below - `xfconf_write_args`
+        // needs to know which, since only the fallback path requires `-n`/`-t` to be
+        // creatable at all.
+        let is_fallback = properties.is_empty();
+        if is_fallback {
             // XFCE has never written a last-image property for this monitor - write a
             // best-effort default rather than silently doing nothing.
             properties.push(fallback_property_for_monitor(&target.uuid));
@@ -66,7 +96,7 @@ impl WallpaperBackend for XfceBackend {
             // argument, never through a shell, so no escaping is needed for quotes,
             // spaces, or any other character a filename might contain.
             let status = std::process::Command::new("xfconf-query")
-                .args(["-c", "xfce4-desktop", "-p", &property, "-s"])
+                .args(xfconf_write_args(&property, is_fallback))
                 .arg(path)
                 .status()?;
             anyhow::ensure!(status.success(), "xfconf-query set {property} exited with {status}");
@@ -109,5 +139,20 @@ mod tests {
             fallback_property_for_monitor("DP-1"),
             "/backdrop/screen0/monitorDP-1/workspace0/last-image"
         );
+    }
+
+    #[test]
+    fn xfconf_write_args_only_adds_create_flags_for_the_fallback_case() {
+        let property = "/backdrop/screen0/monitorDP-1/workspace0/last-image";
+
+        let normal_args = xfconf_write_args(property, false);
+        let fallback_args = xfconf_write_args(property, true);
+
+        assert_eq!(normal_args, vec!["-c", "xfce4-desktop", "-p", property, "-s"]);
+        assert_eq!(
+            fallback_args,
+            vec!["-c", "xfce4-desktop", "-p", property, "-n", "-t", "string", "-s"]
+        );
+        assert_ne!(normal_args, fallback_args, "the fallback write must differ from the normal write");
     }
 }
