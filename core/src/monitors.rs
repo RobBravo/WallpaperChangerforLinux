@@ -22,9 +22,23 @@ struct KscreenJson {
 #[derive(Deserialize)]
 struct KscreenOutput {
     connected: bool,
+    // A connected-but-disabled output (e.g. a laptop's internal screen with the lid
+    // closed, or a monitor turned off in System Settings without being unplugged)
+    // still shows up as `connected: true` but has no `Desktop` in Plasma's own
+    // `desktops()` - treating it as targetable would desync `position_rank`'s index
+    // from that shorter JS-side list, silently targeting the wrong physical monitor.
+    // Absent in a couple of this test module's own older fixtures (real
+    // `kscreen-doctor` output always includes it) - default true rather than fail to
+    // parse an otherwise-valid output.
+    #[serde(default = "default_true")]
+    enabled: bool,
     name: String,
     priority: u32,
     pos: KscreenPos,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Deserialize)]
@@ -104,7 +118,7 @@ pub fn list_connected_monitors() -> anyhow::Result<Vec<Monitor>> {
 
     Ok(outputs
         .into_iter()
-        .filter(|o| o.connected)
+        .filter(|o| o.connected && o.enabled)
         .filter_map(|o| {
             let uuid = uuids.get(&o.name)?.clone();
             Some(Monitor {
@@ -201,6 +215,33 @@ mod tests {
         }"#;
         let outputs = parse_kscreen_outputs(kscreen_json).unwrap();
         assert!(!outputs[0].connected);
+    }
+
+    /// A connected-but-disabled output (lid closed, or turned off in System Settings
+    /// without unplugging) has no `Desktop` in Plasma's `desktops()` - including it in
+    /// `list_connected_monitors()`'s result would desync `position_rank`'s index from
+    /// that shorter list, silently targeting the wrong physical monitor.
+    #[test]
+    fn a_connected_but_disabled_output_is_marked_as_such() {
+        let kscreen_json = r#"{
+            "outputs": [
+                {"connected": true, "enabled": false, "name": "LVDS-1", "priority": 1, "pos": {"x": 0, "y": 0}}
+            ]
+        }"#;
+        let outputs = parse_kscreen_outputs(kscreen_json).unwrap();
+        assert!(outputs[0].connected);
+        assert!(!outputs[0].enabled);
+    }
+
+    #[test]
+    fn an_output_with_no_enabled_field_defaults_to_enabled() {
+        let kscreen_json = r#"{
+            "outputs": [
+                {"connected": true, "name": "LVDS-1", "priority": 1, "pos": {"x": 0, "y": 0}}
+            ]
+        }"#;
+        let outputs = parse_kscreen_outputs(kscreen_json).unwrap();
+        assert!(outputs[0].enabled);
     }
 
     #[test]
