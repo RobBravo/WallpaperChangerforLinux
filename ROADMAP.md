@@ -50,46 +50,40 @@ empezar features grandes sobre una base sin terminar de verificar.
 
 ---
 
-## Fase 1 — Soporte multipantalla (P1)
+## Fase 1 — Soporte multipantalla (P1) — ✅ Completada (2026-08-02)
 
-**Estado actual:** el backend de KDE ya no se cae con varios monitores — el
-script que aplica el fondo (`core/src/kde_backend.rs::build_wallpaper_script`)
-recorre `desktops()` y pone la **misma imagen en todos los monitores**. Lo
-que falta es que cada monitor tenga su propia carpeta y su propia rotación
-independiente, que es lo que la mayoría de la gente espera al pedir "soporte
-multipantalla".
+`Config`/`State` (en `wallpaper-core`) pasaron de un `folder`/`interval` plano
+a una lista de monitores (`Vec<MonitorConfig>`/`Vec<MonitorState>`), cada uno
+identificado por el UUID estable que KDE ya asigna vía KScreen (sobrevive
+reinicios y cambios de puerto). `KdePlasmaBackend::set_wallpaper` ya no
+escribe la misma imagen en todos los `desktops()` — calcula la posición
+relativa del monitor destino (`core/src/kde_backend.rs::position_rank`) y
+aplica solo ahí. El daemon (`daemon/src/engine.rs`, `daemon/src/main.rs`)
+mantiene una cola de rotación y un deadline independiente por monitor, con
+sondeo cada 30s para detectar conexión/desconexión en caliente. La GUI
+(`gui/ui/app-window.slint`, `gui/src/main.rs`) reemplazó el formulario único
+por un `ComboBox` selector de monitor (no `TabWidget` — Slint no soporta una
+cantidad de tabs definida en tiempo de ejecución) y ahora vuelve a
+re-detectar monitores conectados cada 5s mientras la ventana está abierta.
 
-**Por qué va antes que GNOME/XFCE:** el formato de `config.toml`/`state.toml`
-tiene que cambiar para modelar "N monitores, cada uno con su config" en vez
-de un solo `folder`/`interval`. Ese cambio de esquema lo va a tener que
-respetar **cualquier backend futuro**, incluidos GNOME y XFCE. Conviene
-diseñarlo una sola vez, sobre el único backend que ya funciona, antes de
-sumar más backends que tendrían que adaptarse al esquema viejo y después al
-nuevo.
+**Preguntas abiertas resueltas:** un monitor nunca comparte carpeta con otro
+(siempre independientes); un monitor nuevo copia la config del monitor
+principal si existe, o los valores por defecto originales si no.
 
-**Alcance aproximado:**
-- Rediseño de `Config`/`State` en `wallpaper-core` para soportar una lista de
-  monitores (identificados de forma estable — KDE expone nombres de salida
-  vía `desktops()[i].screen` / `QScreen::name()`, hay que confirmar la forma
-  más confiable de identificarlos entre sesiones).
-- `wallpaper_core::scanner`/`queue` pasan de operar sobre una carpeta a
-  operar sobre N carpetas (una cola de rotación independiente por monitor).
-- `KdePlasmaBackend::set_wallpaper` deja de aplicar la misma imagen a todos
-  los `desktops()` — aplica una imagen específica al desktop que corresponde
-  a cada monitor.
-- GUI: la ventana de configuración pasa de un formulario único a uno por
-  monitor detectado (pestañas, o una lista con un formulario por monitor).
-- Manejo de conectar/desconectar un monitor en caliente (¿qué pasa con su
-  configuración guardada si se desconecta y se reconecta después?).
+**Verificado en vivo en esta máquina** (un solo monitor físico disponible):
+instalación limpia con migración automática del `config.toml` plano viejo,
+selector de monitor en la GUI, rotación automática (con dos bugs reales de
+manejo de deadlines encontrados y corregidos durante esta verificación —
+ver el historial de commits de `daemon/src/main.rs`), y pausa por monitor.
 
-**Preguntas abiertas para la sesión de brainstorming de esta fase:**
-- ¿Un monitor puede compartir carpeta con otro, o siempre son independientes?
-- ¿Qué pasa la primera vez que se detecta un monitor nuevo — copia la config
-  del monitor principal, o arranca con los valores por defecto?
-
-**Esfuerzo estimado:** la fase más grande de las tres — toca los tres crates
-(`core`, `daemon`, `gui`) y cambia el formato de los archivos de config
-existentes (necesita migración o versión del esquema).
+**No verificado — requiere un segundo monitor físico:**
+- Que "Cambiar ahora" solo afecte al monitor seleccionado (el mecanismo está
+  probado por unit test, pero no visualmente en dos pantallas reales).
+- Conectar/desconectar un monitor en caliente en hardware real.
+- Que la correlación por posición (`position_rank` en Rust vs. el orden que
+  genera `desktops().sort(...)` en el script JS) realmente coincida en una
+  sesión KWin real con más de un monitor — lo único que el diseño marcó
+  desde el principio como imposible de verificar sin ese hardware.
 
 ---
 
@@ -148,6 +142,6 @@ diseño.
 | Fase | Qué | Prioridad | Tamaño |
 |---|---|---|---|
 | 0 | Verificación pendiente + deuda técnica | P0 | Chico |
-| 1 | Multipantalla (KDE) | P1 | Grande |
+| 1 | Multipantalla (KDE) | P1 | Grande — ✅ Completada |
 | 2 | Soporte GNOME | P2 | Mediano |
 | 3 | Soporte XFCE | P2 | Mediano-grande (incertidumbre) |
