@@ -8,7 +8,7 @@ use std::rc::Rc;
 
 use wallpaper_core::config::{change_now_request_path, gui_lock_path, gui_socket_path, Config, IntervalUnit};
 use wallpaper_core::desktop::{detect_desktop_environment, DesktopEnvironment};
-use wallpaper_core::monitors::{list_connected_monitors, list_gnome_monitors, Monitor};
+use wallpaper_core::monitors::{list_connected_monitors, list_gnome_monitors, list_xfce_monitors, Monitor};
 use wallpaper_core::state::State;
 
 fn unit_to_index(unit: IntervalUnit) -> i32 {
@@ -40,6 +40,7 @@ fn monitor_label(monitor: &Monitor, position: usize) -> String {
 fn monitor_source(env: Option<DesktopEnvironment>) -> (fn() -> anyhow::Result<Vec<Monitor>>, bool) {
     match env {
         Some(DesktopEnvironment::Gnome) => (list_gnome_monitors, true),
+        Some(DesktopEnvironment::Xfce) => (list_xfce_monitors, false),
         _ => (list_connected_monitors, false),
     }
 }
@@ -411,6 +412,13 @@ mod tests {
         // an unsupported desktop might still want to inspect the GUI's settings.
         let (list_monitors, is_gnome) = monitor_source(None);
         assert_eq!(list_monitors as *const () as usize, list_connected_monitors as *const () as usize);
+        assert!(!is_gnome);
+    }
+
+    #[test]
+    fn monitor_source_picks_the_xfce_listing_for_xfce() {
+        let (list_monitors, is_gnome) = monitor_source(Some(DesktopEnvironment::Xfce));
+        assert_eq!(list_monitors as *const () as usize, list_xfce_monitors as *const () as usize);
         assert!(!is_gnome);
     }
 }
