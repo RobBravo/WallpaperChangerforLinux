@@ -105,7 +105,23 @@ fn run<B: wallpaper_core::backend::WallpaperBackend>(
 
                 if config_changed {
                     match Config::load() {
-                        Ok(new_config) => engine.update_config(new_config),
+                        Ok(new_config) => {
+                            engine.update_config(new_config);
+                            // The pre-multi-monitor daemon restarted its one deadline
+                            // fresh on every loop pass, so an interval change took
+                            // effect immediately rather than only after whatever was
+                            // left of the previous (possibly much longer) interval
+                            // expired. Reproduce that per-monitor: every currently
+                            // tracked (connected) monitor's deadline is recomputed
+                            // from its now-current interval, not just the monitor
+                            // that happened to be the one edited.
+                            let now = SystemTime::now();
+                            for uuid in deadlines.keys().cloned().collect::<Vec<_>>() {
+                                let interval = engine.interval(&uuid);
+                                deadlines.insert(uuid.clone(), now + interval);
+                                record_next_change(&state_path, &uuid, unix_now() + interval.as_secs() as i64);
+                            }
+                        }
                         Err(e) => eprintln!("failed to reload config.toml: {e}"),
                     }
                 }
@@ -252,6 +268,72 @@ mod tests {
         let expected = ("uuid-a".to_string(), dir.path().join("a.png"));
         assert!(!recorded.is_empty(), "change_now_request did not trigger a wallpaper change");
         assert!(recorded.iter().all(|call| *call == expected), "recorded calls were: {recorded:?}");
+        drop(handle);
+    }
+
+    /// Regression test: shortening a monitor's interval must take effect immediately,
+    /// not only after whatever remains of its *previous* (possibly much longer)
+    /// interval finally expires. Found via live manual testing (Task 9) - the
+    /// pre-multi-monitor daemon reset its one deadline on every loop pass, so an
+    /// interval change was picked up right away; the per-monitor rewrite only
+    /// recomputed a monitor's deadline when it actually came due, so a monitor left
+    /// running with a long interval would silently ignore a shorter one saved from the
+    /// GUI until the old, much longer deadline happened to expire on its own.
+    #[test]
+    fn shortening_the_interval_resets_the_deadline_instead_of_waiting_out_the_old_one() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.png"), b"x").unwrap();
+
+        let monitor_config = MonitorConfig {
+            uuid: "uuid-a".to_string(),
+            folder: dir.path().to_path_buf(),
+            interval_value: 1,
+            interval_unit: IntervalUnit::Hours, // long enough that only a config reload, not the tick, can shorten it
+            paused: false,
+        };
+        let monitor = Monitor { uuid: "uuid-a".to_string(), connector: "uuid-a".to_string(), is_primary: true, x: 0, y: 0 };
+        let config = Config { monitors: vec![monitor_config] };
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let engine = Engine::new(RecordingBackend { calls: calls.clone() }, config, vec![monitor.clone()]);
+
+        let (tx, rx) = channel();
+        let config_dir = dir.path().to_path_buf();
+        let state_path = dir.path().join("state.toml");
+        let _watcher = watcher::spawn_watcher(config_dir.clone(), tx).unwrap();
+
+        let change_now_request_path = config_dir.join("change_now_request");
+        let handle = thread::spawn(move || {
+            let _ = run(engine, vec![monitor], rx, state_path, change_now_request_path);
+        });
+
+        // Let the startup seed-and-apply happen AND let the loop cycle past its own
+        // 5-second TICK at least once, so the deadline this test is about to shorten
+        // is genuinely the "one hour away" deadline the due-loop set after consuming
+        // the startup seed - not the startup seed itself, which a config-change event
+        // arriving within the same first iteration would trivially fold into a single
+        // pass and mask this exact regression.
+        thread::sleep(Duration::from_secs(6));
+
+        // Save a much shorter interval, same as the GUI's "Guardar" would.
+        let shortened_toml = format!(
+            "[[monitors]]\nuuid = \"uuid-a\"\nfolder = \"{}\"\ninterval_value = 1\ninterval_unit = \"minutes\"\npaused = false\n",
+            dir.path().display()
+        );
+        std::fs::write(config_dir.join("config.toml"), shortened_toml).unwrap();
+        thread::sleep(Duration::from_secs(2));
+
+        let state = State::load_from(&dir.path().join("state.toml")).unwrap();
+        let next_change_at_unix = state.monitor("uuid-a").unwrap().next_change_at_unix;
+        let now = unix_now();
+        // Unreset, the deadline would still be ~3600s away (the original one-hour
+        // interval, computed once at startup). Reset, it's ~60s away (the new
+        // interval, clamped up to Engine's MIN_INTERVAL floor).
+        assert!(
+            next_change_at_unix - now < 300,
+            "interval change was not picked up promptly: next_change_at_unix is {}s away",
+            next_change_at_unix - now
+        );
+
         drop(handle);
     }
 }
