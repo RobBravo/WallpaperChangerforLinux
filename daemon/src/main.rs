@@ -11,7 +11,8 @@ use wallpaper_core::config::{change_now_request_path, config_dir, Config};
 use wallpaper_core::desktop::{detect_desktop_environment, DesktopEnvironment};
 use wallpaper_core::gnome_backend::GnomeBackend;
 use wallpaper_core::kde_backend::KdePlasmaBackend;
-use wallpaper_core::monitors::{list_connected_monitors, list_gnome_monitors, Monitor};
+use wallpaper_core::monitors::{list_connected_monitors, list_gnome_monitors, list_xfce_monitors, Monitor};
+use wallpaper_core::xfce_backend::XfceBackend;
 use wallpaper_core::state::{MonitorState, State};
 
 use engine::Engine;
@@ -35,6 +36,7 @@ fn select_backend(env: DesktopEnvironment) -> (Box<dyn WallpaperBackend>, fn() -
     match env {
         DesktopEnvironment::Kde => (Box::new(KdePlasmaBackend), list_connected_monitors),
         DesktopEnvironment::Gnome => (Box::new(GnomeBackend), list_gnome_monitors),
+        DesktopEnvironment::Xfce => (Box::new(XfceBackend), list_xfce_monitors),
     }
 }
 
@@ -274,6 +276,12 @@ mod tests {
     fn select_backend_picks_gnome_monitor_listing_for_gnome() {
         let (_backend, list_monitors) = select_backend(DesktopEnvironment::Gnome);
         assert_eq!(list_monitors as *const () as usize, list_gnome_monitors as *const () as usize);
+    }
+
+    #[test]
+    fn select_backend_picks_xfce_monitor_listing_for_xfce() {
+        let (_backend, list_monitors) = select_backend(DesktopEnvironment::Xfce);
+        assert_eq!(list_monitors as *const () as usize, list_xfce_monitors as *const () as usize);
     }
 
     #[test]
