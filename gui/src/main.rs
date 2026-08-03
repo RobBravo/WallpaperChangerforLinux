@@ -102,7 +102,12 @@ fn refresh_monitor_list(
     current_uuid: &RefCell<Option<String>>,
     shown_wallpaper: &RefCell<Option<(String, PathBuf)>>,
 ) {
-    let mut monitors = list_connected_monitors().unwrap_or_default();
+    // A transient failure (e.g. `kscreen-doctor` briefly unavailable during a display
+    // reconfiguration) must not be treated as "every monitor just disconnected" - that
+    // would wipe an already-populated dropdown and, on the next successful poll,
+    // overwrite any unsaved form edits when the selection snaps back. Leaving the
+    // existing list untouched is a no-op the first time this runs (it starts empty).
+    let Ok(mut monitors) = list_connected_monitors() else { return };
     monitors.sort_by(|a, b| a.connector.cmp(&b.connector));
     let new_uuids: Vec<String> = monitors.iter().map(|m| m.uuid.clone()).collect();
 
