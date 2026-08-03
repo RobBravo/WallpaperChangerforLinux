@@ -393,14 +393,14 @@ mod tests {
     #[test]
     fn monitor_source_picks_the_gnome_shared_label_and_listing_for_gnome() {
         let (list_monitors, is_gnome) = monitor_source(Some(DesktopEnvironment::Gnome));
-        assert_eq!(list_monitors as usize, list_gnome_monitors as usize);
+        assert_eq!(list_monitors as *const () as usize, list_gnome_monitors as *const () as usize);
         assert!(is_gnome);
     }
 
     #[test]
     fn monitor_source_picks_the_kde_listing_for_kde() {
         let (list_monitors, is_gnome) = monitor_source(Some(DesktopEnvironment::Kde));
-        assert_eq!(list_monitors as usize, list_connected_monitors as usize);
+        assert_eq!(list_monitors as *const () as usize, list_connected_monitors as *const () as usize);
         assert!(!is_gnome);
     }
 
@@ -410,7 +410,7 @@ mod tests {
         // dropdown, no crash) rather than refusing to show anything at all - a user on
         // an unsupported desktop might still want to inspect the GUI's settings.
         let (list_monitors, is_gnome) = monitor_source(None);
-        assert_eq!(list_monitors as usize, list_connected_monitors as usize);
+        assert_eq!(list_monitors as *const () as usize, list_connected_monitors as *const () as usize);
         assert!(!is_gnome);
     }
 }
