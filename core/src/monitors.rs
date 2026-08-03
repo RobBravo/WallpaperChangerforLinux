@@ -122,6 +122,81 @@ pub fn list_gnome_monitors() -> anyhow::Result<Vec<Monitor>> {
     }])
 }
 
+/// Extracts the monitor identifier from one xfconf property path, if it's a
+/// `last-image` property shaped like `/backdrop/screen{N}/monitor{id}/workspace{N}/
+/// last-image`. Anything else (a different property name like `color-style` or
+/// `image-path`, or an unexpected segment count) is `None` rather than a guess -
+/// `xfconf-query -c xfce4-desktop -l` lists every property in the channel, most of
+/// which aren't about which image is shown and must be ignored, not misparsed.
+fn xfce_monitor_id_from_property_path(path: &str) -> Option<String> {
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let [backdrop, screen, monitor, workspace, property] = segments.as_slice() else {
+        return None;
+    };
+    if *backdrop != "backdrop" || *property != "last-image" {
+        return None;
+    }
+    if !screen.starts_with("screen") || !workspace.starts_with("workspace") {
+        return None;
+    }
+    let monitor_id = monitor.strip_prefix("monitor")?;
+    if monitor_id.is_empty() {
+        return None;
+    }
+    Some(monitor_id.to_string())
+}
+
+/// Parses `xfconf-query -c xfce4-desktop -l`'s full output (one property path per
+/// line) into a sorted, deduplicated list of monitor identifiers - sorted because
+/// XFCE's xfconf schema has no "primary monitor" concept to read (unlike KDE's
+/// `priority`), so this project picks whichever identifier sorts first alphabetically
+/// as a deterministic stand-in, used only for Fase 1's "a new monitor copies the
+/// primary's settings" behavior.
+fn parse_xfce_monitor_listing(listing: &str) -> Vec<String> {
+    let mut monitor_ids: Vec<String> = listing
+        .lines()
+        .filter_map(xfce_monitor_id_from_property_path)
+        .collect();
+    monitor_ids.sort();
+    monitor_ids.dedup();
+    monitor_ids
+}
+
+/// Lists every monitor XFCE's own `xfconf` currently has a `last-image` property for.
+///
+/// Unlike KDE (`kscreen-doctor` + `kwinoutputconfig.json`, an independent source of
+/// truth for which monitors are physically connected) or GNOME (no per-monitor
+/// concept at all), XFCE is inferred purely from xfconf's own already-populated
+/// properties - a monitor XFCE's own `xfdesktop` process has never written a
+/// `last-image` property for (e.g. freshly connected, before the user has opened
+/// XFCE's own Appearance settings) will not appear here. This is a known,
+/// intentionally-accepted limitation for this phase (no independent monitor-listing
+/// tool like `xrandr` is cross-checked), documented for live-hardware verification
+/// once available.
+pub fn list_xfce_monitors() -> anyhow::Result<Vec<Monitor>> {
+    let output = std::process::Command::new("xfconf-query")
+        .args(["-c", "xfce4-desktop", "-l"])
+        .output()?;
+    anyhow::ensure!(
+        output.status.success(),
+        "xfconf-query -l exited with {}",
+        output.status
+    );
+    let listing = String::from_utf8(output.stdout)?;
+
+    Ok(parse_xfce_monitor_listing(&listing)
+        .into_iter()
+        .enumerate()
+        .map(|(i, id)| Monitor {
+            uuid: id.clone(),
+            connector: id,
+            is_primary: i == 0,
+            x: 0,
+            y: 0,
+        })
+        .collect())
+}
+
 /// Lists every currently-connected monitor, each with KDE's own stable UUID.
 ///
 /// Combines two sources: `kscreen-doctor --json` for live connected/priority/position
@@ -294,5 +369,48 @@ mod tests {
         assert_eq!(monitors.len(), 1);
         assert_eq!(monitors[0].uuid, GNOME_SHARED_MONITOR_UUID);
         assert!(monitors[0].is_primary);
+    }
+
+    #[test]
+    fn xfce_monitor_id_from_property_path_extracts_the_monitor_segment() {
+        assert_eq!(
+            xfce_monitor_id_from_property_path("/backdrop/screen0/monitorDP-1/workspace0/last-image"),
+            Some("DP-1".to_string())
+        );
+    }
+
+    #[test]
+    fn xfce_monitor_id_from_property_path_handles_numeric_monitor_ids() {
+        assert_eq!(
+            xfce_monitor_id_from_property_path("/backdrop/screen0/monitor0/workspace1/last-image"),
+            Some("0".to_string())
+        );
+    }
+
+    #[test]
+    fn xfce_monitor_id_from_property_path_ignores_unrelated_properties() {
+        assert_eq!(
+            xfce_monitor_id_from_property_path("/backdrop/screen0/monitor0/workspace0/color-style"),
+            None
+        );
+        assert_eq!(xfce_monitor_id_from_property_path("/backdrop/single-workspace-mode"), None);
+        assert_eq!(xfce_monitor_id_from_property_path("/backdrop/screen0/monitor0/image-path"), None);
+    }
+
+    #[test]
+    fn parse_xfce_monitor_listing_extracts_unique_monitors_sorted() {
+        let listing = "\
+/backdrop/screen0/monitor0/workspace0/last-image
+/backdrop/screen0/monitor0/workspace0/color-style
+/backdrop/screen0/monitor0/workspace1/last-image
+/backdrop/screen0/monitorDP-1/workspace0/last-image
+/backdrop/single-workspace-mode
+";
+        assert_eq!(parse_xfce_monitor_listing(listing), vec!["0".to_string(), "DP-1".to_string()]);
+    }
+
+    #[test]
+    fn parse_xfce_monitor_listing_returns_empty_for_a_channel_with_no_monitors_configured() {
+        assert_eq!(parse_xfce_monitor_listing("/backdrop/single-workspace-mode\n"), Vec::<String>::new());
     }
 }
