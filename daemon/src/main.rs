@@ -6,9 +6,12 @@ use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, TryRecvError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use wallpaper_core::backend::WallpaperBackend;
 use wallpaper_core::config::{change_now_request_path, config_dir, Config};
+use wallpaper_core::desktop::{detect_desktop_environment, DesktopEnvironment};
+use wallpaper_core::gnome_backend::GnomeBackend;
 use wallpaper_core::kde_backend::KdePlasmaBackend;
-use wallpaper_core::monitors::{list_connected_monitors, Monitor};
+use wallpaper_core::monitors::{list_connected_monitors, list_gnome_monitors, Monitor};
 use wallpaper_core::state::{MonitorState, State};
 
 use engine::Engine;
@@ -24,6 +27,16 @@ const TICK: Duration = Duration::from_secs(5);
 /// individual monitor's own rotation interval - this project deliberately polls
 /// (rather than subscribing to a KScreen D-Bus signal) per this plan's design.
 const MONITOR_POLL_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Picks the backend and monitor-listing function for the given desktop environment.
+/// Pulled out of `main()` as its own function so the KDE-vs-GNOME decision itself is
+/// unit-testable without needing a live desktop session.
+fn select_backend(env: DesktopEnvironment) -> (Box<dyn WallpaperBackend>, fn() -> anyhow::Result<Vec<Monitor>>) {
+    match env {
+        DesktopEnvironment::Kde => (Box::new(KdePlasmaBackend), list_connected_monitors),
+        DesktopEnvironment::Gnome => (Box::new(GnomeBackend), list_gnome_monitors),
+    }
+}
 
 fn unix_now() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64
@@ -72,6 +85,7 @@ fn run<B: wallpaper_core::backend::WallpaperBackend>(
     rx: Receiver<DaemonEvent>,
     state_path: std::path::PathBuf,
     change_now_request_path: std::path::PathBuf,
+    list_monitors: fn() -> anyhow::Result<Vec<Monitor>>,
 ) -> anyhow::Result<()> {
     let now = SystemTime::now();
     // Seed every monitor `engine` was already constructed with as immediately due, so
@@ -159,7 +173,7 @@ fn run<B: wallpaper_core::backend::WallpaperBackend>(
         let now = SystemTime::now();
 
         if now >= next_monitor_poll {
-            match list_connected_monitors() {
+            match list_monitors() {
                 Ok(monitors) => {
                     if let Some(updated_config) = engine.update_monitors(monitors.clone()) {
                         if let Err(e) = updated_config.save() {
@@ -196,6 +210,14 @@ fn run<B: wallpaper_core::backend::WallpaperBackend>(
 }
 
 fn main() -> anyhow::Result<()> {
+    let Some(desktop_environment) = detect_desktop_environment() else {
+        let value = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+        anyhow::bail!(
+            "desktop environment '{value}' is not supported - this app supports KDE Plasma and GNOME"
+        );
+    };
+    let (backend, list_monitors) = select_backend(desktop_environment);
+
     // A malformed config.toml must not be fatal: exiting non-zero here would make
     // systemd's `Restart=on-failure` retry forever, leaving the user with no rotation
     // and no tray icon. Fall back to defaults in memory and leave the user's file
@@ -204,14 +226,21 @@ fn main() -> anyhow::Result<()> {
         eprintln!("failed to load config.toml ({e}); using default settings until it is fixed");
         Config::default()
     });
-    let monitors = list_connected_monitors().unwrap_or_default();
-    let engine = Engine::new(KdePlasmaBackend, config, monitors.clone());
+    let monitors = list_monitors().unwrap_or_default();
+    let engine = Engine::new(backend, config, monitors.clone());
 
     let (tx, rx) = channel::<DaemonEvent>();
     let _watcher = watcher::spawn_watcher(config_dir(), tx)?;
     tray::spawn_tray();
 
-    run(engine, monitors, rx, wallpaper_core::state::state_path(), change_now_request_path())
+    run(
+        engine,
+        monitors,
+        rx,
+        wallpaper_core::state::state_path(),
+        change_now_request_path(),
+        list_monitors,
+    )
 }
 
 #[cfg(test)]
@@ -233,6 +262,18 @@ mod tests {
             self.calls.lock().unwrap().push((target.uuid.clone(), path.to_path_buf()));
             Ok(())
         }
+    }
+
+    #[test]
+    fn select_backend_picks_kde_monitor_listing_for_kde() {
+        let (_backend, list_monitors) = select_backend(DesktopEnvironment::Kde);
+        assert_eq!(list_monitors as usize, list_connected_monitors as usize);
+    }
+
+    #[test]
+    fn select_backend_picks_gnome_monitor_listing_for_gnome() {
+        let (_backend, list_monitors) = select_backend(DesktopEnvironment::Gnome);
+        assert_eq!(list_monitors as usize, list_gnome_monitors as usize);
     }
 
     #[test]
@@ -259,7 +300,7 @@ mod tests {
 
         let change_now_request_path = config_dir.join("change_now_request");
         let handle = thread::spawn(move || {
-            let _ = run(engine, vec![monitor], rx, state_path, change_now_request_path);
+            let _ = run(engine, vec![monitor], rx, state_path, change_now_request_path, list_connected_monitors);
         });
 
         std::fs::write(config_dir.join("change_now_request"), b"uuid-a").unwrap();
@@ -285,12 +326,13 @@ mod tests {
 
     /// Regression test: shortening a monitor's interval must take effect immediately,
     /// not only after whatever remains of its *previous* (possibly much longer)
-    /// interval finally expires. Found via live manual testing (Task 9) - the
-    /// pre-multi-monitor daemon reset its one deadline on every loop pass, so an
-    /// interval change was picked up right away; the per-monitor rewrite only
-    /// recomputed a monitor's deadline when it actually came due, so a monitor left
-    /// running with a long interval would silently ignore a shorter one saved from the
-    /// GUI until the old, much longer deadline happened to expire on its own.
+    /// interval finally expires. Found via live manual testing (Task 9 of the
+    /// multi-monitor plan) - the pre-multi-monitor daemon reset its one deadline on
+    /// every loop pass, so an interval change was picked up right away; the
+    /// per-monitor rewrite only recomputed a monitor's deadline when it actually came
+    /// due, so a monitor left running with a long interval would silently ignore a
+    /// shorter one saved from the GUI until the old, much longer deadline happened to
+    /// expire on its own.
     #[test]
     fn shortening_the_interval_resets_the_deadline_instead_of_waiting_out_the_old_one() {
         let dir = tempfile::tempdir().unwrap();
@@ -315,7 +357,7 @@ mod tests {
 
         let change_now_request_path = config_dir.join("change_now_request");
         let handle = thread::spawn(move || {
-            let _ = run(engine, vec![monitor], rx, state_path, change_now_request_path);
+            let _ = run(engine, vec![monitor], rx, state_path, change_now_request_path, list_connected_monitors);
         });
 
         // Let the startup seed-and-apply happen AND let the loop cycle past its own
@@ -352,12 +394,12 @@ mod tests {
     /// Regression test: re-saving config.toml with *no actual change* (exactly what
     /// the hot-plug poll's own `updated_config.save()` does every 30 seconds,
     /// unconditionally, even when nothing about any monitor changed) must not keep
-    /// resetting an already-scheduled deadline - found via live manual testing (Task
-    /// 9) as a bug in the fix for the previous regression test: naively resetting
-    /// every tracked monitor's deadline on *any* `ConfigChanged` event perpetually
-    /// postponed rotation, since the routine poll re-save re-triggers that same event
-    /// every 30 seconds, before a 60-second-minimum interval could ever actually come
-    /// due.
+    /// resetting an already-scheduled deadline - found via live manual testing (Task 9
+    /// of the multi-monitor plan) as a bug in the fix for the previous regression
+    /// test: naively resetting every tracked monitor's deadline on *any*
+    /// `ConfigChanged` event perpetually postponed rotation, since the routine poll
+    /// re-save re-triggers that same event every 30 seconds, before a
+    /// 60-second-minimum interval could ever actually come due.
     #[test]
     fn a_no_op_config_resave_does_not_postpone_an_already_scheduled_rotation() {
         let dir = tempfile::tempdir().unwrap();
@@ -383,7 +425,7 @@ mod tests {
 
         let change_now_request_path = config_dir.join("change_now_request");
         let handle = thread::spawn(move || {
-            let _ = run(engine, vec![monitor], rx, state_path, change_now_request_path);
+            let _ = run(engine, vec![monitor], rx, state_path, change_now_request_path, list_connected_monitors);
         });
 
         // Let the startup seed-and-apply happen and the loop cycle past its own
@@ -401,8 +443,8 @@ mod tests {
         // kept well under 30s in total so this test's own run doesn't cross that real
         // poll boundary itself and call the live, unmocked `list_connected_monitors()`
         // (which corrupted an earlier test the same way before that poll was deferred
-        // at startup - see Task 6's history - a risk that reappears any time a test in
-        // this file runs past 30s).
+        // at startup - see the multi-monitor plan's Task 6 history - a risk that
+        // reappears any time a test in this file runs past 30s).
         for _ in 0..3 {
             std::fs::write(config_dir.join("config.toml"), &same_toml).unwrap();
             thread::sleep(Duration::from_secs(3));
