@@ -104,6 +104,14 @@ fn run<B: wallpaper_core::backend::WallpaperBackend>(
                 }
 
                 if config_changed {
+                    // The 30-second hot-plug poll below unconditionally re-saves
+                    // config.toml every cycle even when nothing changed, which the
+                    // watcher reports as a `ConfigChanged` event just like a real
+                    // edit - capture each tracked monitor's interval *before*
+                    // reloading so a genuine interval change can be told apart from
+                    // that routine, no-op re-save below.
+                    let old_intervals: HashMap<String, Duration> =
+                        deadlines.keys().map(|uuid| (uuid.clone(), engine.interval(uuid))).collect();
                     match Config::load() {
                         Ok(new_config) => {
                             engine.update_config(new_config);
@@ -111,15 +119,18 @@ fn run<B: wallpaper_core::backend::WallpaperBackend>(
                             // fresh on every loop pass, so an interval change took
                             // effect immediately rather than only after whatever was
                             // left of the previous (possibly much longer) interval
-                            // expired. Reproduce that per-monitor: every currently
-                            // tracked (connected) monitor's deadline is recomputed
-                            // from its now-current interval, not just the monitor
-                            // that happened to be the one edited.
+                            // expired. Reproduce that per-monitor, but only for a
+                            // monitor whose interval genuinely changed - resetting
+                            // every tracked monitor unconditionally would also fire on
+                            // the hot-plug poll's routine re-save below, perpetually
+                            // postponing rotation before it can ever come due.
                             let now = SystemTime::now();
-                            for uuid in deadlines.keys().cloned().collect::<Vec<_>>() {
+                            for (uuid, old_interval) in old_intervals {
                                 let interval = engine.interval(&uuid);
-                                deadlines.insert(uuid.clone(), now + interval);
-                                record_next_change(&state_path, &uuid, unix_now() + interval.as_secs() as i64);
+                                if interval != old_interval {
+                                    deadlines.insert(uuid.clone(), now + interval);
+                                    record_next_change(&state_path, &uuid, unix_now() + interval.as_secs() as i64);
+                                }
                             }
                         }
                         Err(e) => eprintln!("failed to reload config.toml: {e}"),
@@ -332,6 +343,80 @@ mod tests {
             next_change_at_unix - now < 300,
             "interval change was not picked up promptly: next_change_at_unix is {}s away",
             next_change_at_unix - now
+        );
+
+        drop(handle);
+    }
+
+    /// Regression test: re-saving config.toml with *no actual change* (exactly what
+    /// the hot-plug poll's own `updated_config.save()` does every 30 seconds,
+    /// unconditionally, even when nothing about any monitor changed) must not keep
+    /// resetting an already-scheduled deadline - found via live manual testing (Task
+    /// 9) as a bug in the fix for the previous regression test: naively resetting
+    /// every tracked monitor's deadline on *any* `ConfigChanged` event perpetually
+    /// postponed rotation, since the routine poll re-save re-triggers that same event
+    /// every 30 seconds, before a 60-second-minimum interval could ever actually come
+    /// due.
+    #[test]
+    fn a_no_op_config_resave_does_not_postpone_an_already_scheduled_rotation() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.png"), b"x").unwrap();
+        std::fs::write(dir.path().join("b.png"), b"y").unwrap();
+
+        let monitor_config = MonitorConfig {
+            uuid: "uuid-a".to_string(),
+            folder: dir.path().to_path_buf(),
+            interval_value: 1,
+            interval_unit: IntervalUnit::Minutes, // clamped up to Engine's 60s MIN_INTERVAL floor
+            paused: false,
+        };
+        let monitor = Monitor { uuid: "uuid-a".to_string(), connector: "uuid-a".to_string(), is_primary: true, x: 0, y: 0 };
+        let config = Config { monitors: vec![monitor_config] };
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let engine = Engine::new(RecordingBackend { calls: calls.clone() }, config, vec![monitor.clone()]);
+
+        let (tx, rx) = channel();
+        let config_dir = dir.path().to_path_buf();
+        let state_path = dir.path().join("state.toml");
+        let _watcher = watcher::spawn_watcher(config_dir.clone(), tx).unwrap();
+
+        let change_now_request_path = config_dir.join("change_now_request");
+        let handle = thread::spawn(move || {
+            let _ = run(engine, vec![monitor], rx, state_path, change_now_request_path);
+        });
+
+        // Let the startup seed-and-apply happen and the loop cycle past its own
+        // 5-second TICK, so the deadline below is genuinely the due-loop's freshly
+        // scheduled ~60s-away deadline, not the startup seed itself.
+        thread::sleep(Duration::from_secs(6));
+
+        let state_path_check = dir.path().join("state.toml");
+        let deadline_before = State::load_from(&state_path_check).unwrap().monitor("uuid-a").unwrap().next_change_at_unix;
+
+        let same_toml = "[[monitors]]\nuuid = \"uuid-a\"\nfolder = \"REPLACED\"\ninterval_value = 1\ninterval_unit = \"minutes\"\npaused = false\n"
+            .replace("REPLACED", &dir.path().display().to_string());
+        // Rewrite the *identical* config.toml a few times over ~9s, mimicking the
+        // hot-plug poll's own unconditional, no-op re-save on its 30-second cadence -
+        // kept well under 30s in total so this test's own run doesn't cross that real
+        // poll boundary itself and call the live, unmocked `list_connected_monitors()`
+        // (which corrupted an earlier test the same way before that poll was deferred
+        // at startup - see Task 6's history - a risk that reappears any time a test in
+        // this file runs past 30s).
+        for _ in 0..3 {
+            std::fs::write(config_dir.join("config.toml"), &same_toml).unwrap();
+            thread::sleep(Duration::from_secs(3));
+        }
+
+        let deadline_after = State::load_from(&state_path_check).unwrap().monitor("uuid-a").unwrap().next_change_at_unix;
+        // Unfixed, each no-op resave above would have pushed the deadline another 60s
+        // out (three resaves = +180s or more); fixed, an interval that didn't actually
+        // change leaves the deadline alone, so it's unchanged (or only a couple of
+        // seconds off from re-saving at very nearly - but not exactly - the original
+        // recorded second).
+        assert!(
+            (deadline_after - deadline_before).abs() <= 2,
+            "a no-op config re-save moved the deadline from {deadline_before} to {deadline_after} ({}s) - it should have been left untouched",
+            deadline_after - deadline_before
         );
 
         drop(handle);
