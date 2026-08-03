@@ -104,7 +104,22 @@ impl<B: WallpaperBackend> Engine<B> {
     /// needlessly and risk clobbering an in-flight migration or a GUI save that landed
     /// mid-poll with stale in-memory data.
     pub fn update_monitors(&mut self, monitors: Vec<Monitor>) -> Option<Config> {
-        let primary_uuid = monitors.iter().find(|m| m.is_primary).map(|m| m.uuid.clone());
+        // Prefer the monitor currently flagged primary as the settings donor, but only
+        // when it's already configured - for KDE/GNOME this is nearly always true (a
+        // primary monitor was almost always already known before a sibling monitor
+        // shows up), so this matches prior behavior exactly there. Under XFCE, though,
+        // "primary" is just whichever monitor id sorts first alphabetically (see
+        // `list_xfce_monitors`'s doc comment) - a monitor that is itself brand new in
+        // this very batch can be alphabetically first, and it has no config history of
+        // its own to donate. In that case, fall back to any OTHER monitor in the batch
+        // that's already configured; if none of the connected monitors have a config
+        // entry yet (e.g. this is the very first monitor(s) ever seen), `primary_uuid`
+        // stays `None`, exactly matching prior behavior for that edge case.
+        let primary_uuid = monitors
+            .iter()
+            .find(|m| m.is_primary && self.config.monitor(&m.uuid).is_some())
+            .or_else(|| monitors.iter().find(|m| self.config.monitor(&m.uuid).is_some()))
+            .map(|m| m.uuid.clone());
         let mut added_a_monitor = false;
         for monitor in &monitors {
             if self.config.monitor(&monitor.uuid).is_none() {
@@ -247,6 +262,31 @@ mod tests {
         let new_entry = updated_config.monitor("new").unwrap();
         assert_eq!(new_entry.interval_value, 45);
         assert_eq!(new_entry.interval_unit, IntervalUnit::Hours);
+    }
+
+    /// Regression test for the XFCE case where a brand-new monitor happens to sort
+    /// alphabetically first and gets flagged `is_primary` in the very same batch that
+    /// introduces it - it must NOT be treated as the settings donor over a sibling
+    /// monitor that's actually already configured. See `update_monitors`'s doc comment
+    /// on `primary_uuid` for the full scenario.
+    #[test]
+    fn update_monitors_does_not_let_a_newly_primary_monitor_shadow_an_already_configured_sibling() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut hdmi_cfg = monitor_config("HDMI-1", dir.path().to_path_buf());
+        hdmi_cfg.interval_value = 240;
+        let config = Config { monitors: vec![hdmi_cfg] };
+        let backend = FakeBackend { calls: Arc::new(Mutex::new(Vec::new())) };
+        let mut engine = Engine::new(backend, config, vec![monitor("HDMI-1", false)]);
+
+        let updated_config = engine
+            .update_monitors(vec![monitor("DP-1", true), monitor("HDMI-1", false)])
+            .expect("a new monitor connected, so a Config to persist was expected");
+
+        let new_entry = updated_config.monitor("DP-1").unwrap();
+        assert_eq!(
+            new_entry.interval_value, 240,
+            "DP-1 should inherit already-configured HDMI-1's settings, not hardcoded defaults"
+        );
     }
 
     /// Regression test: the 30-second hot-plug poll calls `update_monitors` on every
