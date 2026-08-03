@@ -231,7 +231,7 @@ fn main() -> anyhow::Result<()> {
 
     let (tx, rx) = channel::<DaemonEvent>();
     let _watcher = watcher::spawn_watcher(config_dir(), tx)?;
-    tray::spawn_tray();
+    tray::spawn_tray(list_monitors);
 
     run(
         engine,
@@ -267,13 +267,13 @@ mod tests {
     #[test]
     fn select_backend_picks_kde_monitor_listing_for_kde() {
         let (_backend, list_monitors) = select_backend(DesktopEnvironment::Kde);
-        assert_eq!(list_monitors as usize, list_connected_monitors as usize);
+        assert_eq!(list_monitors as *const () as usize, list_connected_monitors as *const () as usize);
     }
 
     #[test]
     fn select_backend_picks_gnome_monitor_listing_for_gnome() {
         let (_backend, list_monitors) = select_backend(DesktopEnvironment::Gnome);
-        assert_eq!(list_monitors as usize, list_gnome_monitors as usize);
+        assert_eq!(list_monitors as *const () as usize, list_gnome_monitors as *const () as usize);
     }
 
     #[test]

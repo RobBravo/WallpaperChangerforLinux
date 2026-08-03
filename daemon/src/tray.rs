@@ -1,8 +1,10 @@
 use ksni::blocking::TrayMethods;
 use wallpaper_core::config::{change_now_request_path, Config};
-use wallpaper_core::monitors::list_connected_monitors;
+use wallpaper_core::monitors::Monitor;
 
-struct DaemonTray;
+struct DaemonTray {
+    list_monitors: fn() -> anyhow::Result<Vec<Monitor>>,
+}
 
 impl ksni::Tray for DaemonTray {
     fn id(&self) -> String {
@@ -22,13 +24,13 @@ impl ksni::Tray for DaemonTray {
         vec![
             StandardItem {
                 label: "Pausar/Reanudar".into(),
-                activate: Box::new(|_: &mut Self| toggle_pause()),
+                activate: Box::new(|tray: &mut Self| toggle_pause(tray.list_monitors)),
                 ..Default::default()
             }
             .into(),
             StandardItem {
                 label: "Cambiar ahora".into(),
-                activate: Box::new(|_: &mut Self| request_change_now()),
+                activate: Box::new(|tray: &mut Self| request_change_now(tray.list_monitors)),
                 ..Default::default()
             }
             .into(),
@@ -51,16 +53,16 @@ impl ksni::Tray for DaemonTray {
 /// The tray has no per-monitor UI of its own, so "Pausar/Reanudar" and "Cambiar
 /// ahora" act on the primary monitor as a stopgap - the GUI (with its own monitor
 /// selector) is the way to control a non-primary monitor.
-fn primary_monitor_uuid() -> Option<String> {
-    list_connected_monitors()
+fn primary_monitor_uuid(list_monitors: fn() -> anyhow::Result<Vec<Monitor>>) -> Option<String> {
+    list_monitors()
         .ok()?
         .into_iter()
         .find(|m| m.is_primary)
         .map(|m| m.uuid)
 }
 
-fn toggle_pause() {
-    let Some(uuid) = primary_monitor_uuid() else {
+fn toggle_pause(list_monitors: fn() -> anyhow::Result<Vec<Monitor>>) {
+    let Some(uuid) = primary_monitor_uuid(list_monitors) else {
         eprintln!("tray: no primary monitor detected, cannot toggle pause");
         return;
     };
@@ -78,8 +80,8 @@ fn toggle_pause() {
     }
 }
 
-fn request_change_now() {
-    let Some(uuid) = primary_monitor_uuid() else {
+fn request_change_now(list_monitors: fn() -> anyhow::Result<Vec<Monitor>>) {
+    let Some(uuid) = primary_monitor_uuid(list_monitors) else {
         eprintln!("tray: no primary monitor detected, cannot request an immediate change");
         return;
     };
@@ -111,15 +113,15 @@ fn open_config_gui() {
     }
 }
 
-pub fn spawn_tray() {
+pub fn spawn_tray(list_monitors: fn() -> anyhow::Result<Vec<Monitor>>) {
     // ksni 0.3.6's blocking API is `TrayMethods::spawn`. Its initial D-Bus
     // session connect + `request_name` + `register_status_notifier_item`
     // handshake run synchronously on the calling thread before `spawn()`
     // returns a `Handle` for the backgrounded service loop. To keep that
     // handshake from delaying the daemon's own startup, the whole tray
     // setup runs on its own OS thread rather than on `main()`'s thread.
-    std::thread::spawn(|| {
-        if let Err(e) = DaemonTray.spawn() {
+    std::thread::spawn(move || {
+        if let Err(e) = (DaemonTray { list_monitors }).spawn() {
             eprintln!("tray: failed to start system tray icon: {e}");
         }
     });
@@ -129,6 +131,30 @@ pub fn spawn_tray() {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    /// A fake `list_monitors` standing in for a desktop-specific listing function
+    /// (e.g. `list_gnome_monitors`) - a plain top-level `fn` so it coerces to the bare
+    /// function pointer `primary_monitor_uuid` expects, same as a real listing
+    /// function would.
+    fn fake_list_monitors() -> anyhow::Result<Vec<Monitor>> {
+        Ok(vec![Monitor {
+            uuid: "fake-uuid".to_string(),
+            connector: "FAKE".to_string(),
+            is_primary: true,
+            x: 0,
+            y: 0,
+        }])
+    }
+
+    /// Regression test for the whole-branch review finding that `primary_monitor_uuid`
+    /// used to hardcode `list_connected_monitors` (KDE-only), so the tray's
+    /// "Pausar/Reanudar" and "Cambiar ahora" silently did nothing under GNOME. Proves
+    /// it now uses whichever `list_monitors` function it's given, rather than a
+    /// hardcoded one.
+    #[test]
+    fn primary_monitor_uuid_uses_whichever_list_monitors_function_it_is_given() {
+        assert_eq!(primary_monitor_uuid(fake_list_monitors), Some("fake-uuid".to_string()));
+    }
 
     #[test]
     fn reap_in_background_waits_for_the_child_so_it_does_not_stay_a_zombie() {
