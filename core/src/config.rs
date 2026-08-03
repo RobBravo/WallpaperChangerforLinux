@@ -92,6 +92,7 @@ impl Config {
     ) -> fn() -> anyhow::Result<Vec<crate::monitors::Monitor>> {
         match env {
             Some(crate::desktop::DesktopEnvironment::Gnome) => crate::monitors::list_gnome_monitors,
+            Some(crate::desktop::DesktopEnvironment::Xfce) => crate::monitors::list_xfce_monitors,
             _ => crate::monitors::list_connected_monitors,
         }
     }
@@ -294,6 +295,15 @@ mod tests {
         assert_eq!(
             undetected as *const () as usize,
             crate::monitors::list_connected_monitors as *const () as usize
+        );
+    }
+
+    #[test]
+    fn migration_list_monitors_resolves_xfce_listing_for_xfce() {
+        let xfce = Config::migration_list_monitors(Some(crate::desktop::DesktopEnvironment::Xfce));
+        assert_eq!(
+            xfce as *const () as usize,
+            crate::monitors::list_xfce_monitors as *const () as usize
         );
     }
 
