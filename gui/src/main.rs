@@ -85,6 +85,57 @@ fn refresh_state(ui: &AppWindow, uuid: &str, shown_wallpaper: &RefCell<Option<(S
     ui.set_countdown_text(format!("Próximo cambio en {hours:02}:{minutes:02}:{seconds:02}").into());
 }
 
+/// Re-enumerates connected monitors and updates the dropdown if the set changed.
+/// The GUI is a tray-resident, long-lived singleton (unlike the daemon, it isn't
+/// restarted when a monitor is hot-plugged), so without this the dropdown would
+/// permanently reflect only whatever was connected at the moment the GUI first
+/// launched - plugging in a second monitor would never make it selectable, even by
+/// closing and reopening the window (only killing the whole process would help).
+///
+/// Preserves the current selection across a refresh when the selected monitor is
+/// still connected (its index may have moved after a resort); falls back to the
+/// first available monitor if it was unplugged, or to no selection if none remain.
+fn refresh_monitor_list(
+    ui: &AppWindow,
+    uuids: &RefCell<Vec<String>>,
+    primary_uuid: &RefCell<Option<String>>,
+    current_uuid: &RefCell<Option<String>>,
+    shown_wallpaper: &RefCell<Option<(String, PathBuf)>>,
+) {
+    let mut monitors = list_connected_monitors().unwrap_or_default();
+    monitors.sort_by(|a, b| a.connector.cmp(&b.connector));
+    let new_uuids: Vec<String> = monitors.iter().map(|m| m.uuid.clone()).collect();
+
+    if *uuids.borrow() == new_uuids {
+        return; // nothing connected/disconnected since the last check
+    }
+
+    let new_primary = monitors.iter().find(|m| m.is_primary).map(|m| m.uuid.clone());
+    let labels: Vec<slint::SharedString> =
+        monitors.iter().enumerate().map(|(i, m)| monitor_label(m, i).into()).collect();
+    ui.set_monitor_labels(Rc::new(slint::VecModel::from(labels)).into());
+
+    let still_connected = current_uuid.borrow().as_ref().is_some_and(|uuid| new_uuids.contains(uuid));
+    let new_current = if still_connected { current_uuid.borrow().clone() } else { new_uuids.first().cloned() };
+    let new_index = new_current.as_ref().and_then(|uuid| new_uuids.iter().position(|u| u == uuid)).unwrap_or(0);
+
+    *uuids.borrow_mut() = new_uuids;
+    *primary_uuid.borrow_mut() = new_primary;
+    ui.set_selected_monitor_index(new_index as i32);
+
+    if new_current != *current_uuid.borrow() {
+        *shown_wallpaper.borrow_mut() = None; // force a fresh decode for the newly-selected monitor
+    }
+    *current_uuid.borrow_mut() = new_current.clone();
+
+    if let Some(uuid) = new_current {
+        if let Ok(config) = Config::load() {
+            populate_form(ui, &uuid, &config, primary_uuid.borrow().as_deref());
+        }
+        refresh_state(ui, &uuid, shown_wallpaper);
+    }
+}
+
 /// Shows the window if it's hidden, hides it if it's visible. Shared by the tray
 /// menu's "Mostrar/Ocultar ventana" and the window's own close button.
 fn toggle_visibility(ui: &AppWindow) {
@@ -124,29 +175,12 @@ fn main() -> anyhow::Result<()> {
     let ui = AppWindow::new()?;
     let tray = GuiTray::new()?;
 
-    let mut monitors = list_connected_monitors().unwrap_or_default();
-    monitors.sort_by(|a, b| a.connector.cmp(&b.connector));
-    let primary_uuid = monitors.iter().find(|m| m.is_primary).map(|m| m.uuid.clone());
-    let uuids: Rc<Vec<String>> = Rc::new(monitors.iter().map(|m| m.uuid.clone()).collect());
-
-    let labels: Vec<slint::SharedString> = monitors
-        .iter()
-        .enumerate()
-        .map(|(i, m)| monitor_label(m, i).into())
-        .collect();
-    let labels_model = Rc::new(slint::VecModel::from(labels));
-    ui.set_monitor_labels(labels_model.into());
-    ui.set_selected_monitor_index(0);
-
-    let current_uuid: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(uuids.first().cloned()));
+    let uuids: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let primary_uuid: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    let current_uuid: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
     let shown_wallpaper: Rc<RefCell<Option<(String, PathBuf)>>> = Rc::new(RefCell::new(None));
 
-    if let Some(uuid) = current_uuid.borrow().clone() {
-        if let Ok(config) = Config::load() {
-            populate_form(&ui, &uuid, &config, primary_uuid.as_deref());
-        }
-        refresh_state(&ui, &uuid, &shown_wallpaper);
-    }
+    refresh_monitor_list(&ui, &uuids, &primary_uuid, &current_uuid, &shown_wallpaper);
 
     ui.on_monitor_selected({
         let ui_handle = ui.as_weak();
@@ -157,13 +191,13 @@ fn main() -> anyhow::Result<()> {
         move || {
             let Some(ui) = ui_handle.upgrade() else { return };
             let index = ui.get_selected_monitor_index();
-            let Some(uuid) = uuids.get(index as usize) else { return };
+            let Some(uuid) = uuids.borrow().get(index as usize).cloned() else { return };
             *current_uuid.borrow_mut() = Some(uuid.clone());
             *shown_wallpaper.borrow_mut() = None; // force a fresh decode for the newly-selected monitor
             if let Ok(config) = Config::load() {
-                populate_form(&ui, uuid, &config, primary_uuid.as_deref());
+                populate_form(&ui, &uuid, &config, primary_uuid.borrow().as_deref());
             }
-            refresh_state(&ui, uuid, &shown_wallpaper);
+            refresh_state(&ui, &uuid, &shown_wallpaper);
         }
     });
 
@@ -223,7 +257,7 @@ fn main() -> anyhow::Result<()> {
                     // toggle, not the save button (same rule as before this plan).
                 }
                 None => {
-                    let mut fresh = config.for_new_monitor(&uuid, primary_uuid.as_deref());
+                    let mut fresh = config.for_new_monitor(&uuid, primary_uuid.borrow().as_deref());
                     fresh.folder = folder;
                     fresh.interval_value = interval_value;
                     fresh.interval_unit = interval_unit;
@@ -285,6 +319,32 @@ fn main() -> anyhow::Result<()> {
                     if let Some(uuid) = current_uuid.borrow().clone() {
                         refresh_state(&ui, &uuid, &shown_wallpaper);
                     }
+                }
+            },
+        );
+    }
+
+    // Separate from the 1-second state timer above: re-enumerating monitors spawns a
+    // `kscreen-doctor` subprocess, so this runs on its own, coarser cadence rather
+    // than every tick. The GUI is a tray-resident singleton (see
+    // `refresh_monitor_list`'s doc comment) so this is the only thing that ever
+    // notices a hot-plugged monitor while it's already running.
+    let monitor_poll_timer = slint::Timer::default();
+    {
+        let ui_handle = ui.as_weak();
+        let uuids = uuids.clone();
+        let primary_uuid = primary_uuid.clone();
+        let current_uuid = current_uuid.clone();
+        let shown_wallpaper = shown_wallpaper.clone();
+        monitor_poll_timer.start(
+            slint::TimerMode::Repeated,
+            std::time::Duration::from_secs(5),
+            move || {
+                if let Some(ui) = ui_handle.upgrade() {
+                    if !ui.window().is_visible() {
+                        return;
+                    }
+                    refresh_monitor_list(&ui, &uuids, &primary_uuid, &current_uuid, &shown_wallpaper);
                 }
             },
         );
