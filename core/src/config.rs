@@ -126,10 +126,11 @@ impl Config {
     /// Migration needs to know which monitor to assign the old settings to (the old
     /// format has no UUID), so it asks whichever monitor-listing function matches the
     /// currently detected desktop environment (`list_gnome_monitors` under GNOME,
-    /// `list_connected_monitors` otherwise - the same KDE-vs-GNOME decision as
-    /// `select_backend` in the daemon and `monitor_source` in the GUI, via
-    /// `migration_list_monitors`) for whichever monitor is currently primary. If that
-    /// fails (e.g. `kscreen-doctor` isn't installed) or no monitor is connected,
+    /// `list_xfce_monitors` under XFCE, `list_connected_monitors` otherwise - the same
+    /// desktop-environment decision as `select_backend` in the daemon and
+    /// `monitor_source` in the GUI, via `migration_list_monitors`) for whichever
+    /// monitor is currently primary. If that fails (e.g. `kscreen-doctor` isn't
+    /// installed) or no monitor is connected,
     /// migration is skipped for now and an empty config is used instead - the old file
     /// on disk is left untouched unless migration actually succeeds, so a later
     /// successful detection can retry it.

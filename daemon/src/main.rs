@@ -12,8 +12,8 @@ use wallpaper_core::desktop::{detect_desktop_environment, DesktopEnvironment};
 use wallpaper_core::gnome_backend::GnomeBackend;
 use wallpaper_core::kde_backend::KdePlasmaBackend;
 use wallpaper_core::monitors::{list_connected_monitors, list_gnome_monitors, list_xfce_monitors, Monitor};
-use wallpaper_core::xfce_backend::XfceBackend;
 use wallpaper_core::state::{MonitorState, State};
+use wallpaper_core::xfce_backend::XfceBackend;
 
 use engine::Engine;
 use watcher::DaemonEvent;
@@ -30,8 +30,8 @@ const TICK: Duration = Duration::from_secs(5);
 const MONITOR_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Picks the backend and monitor-listing function for the given desktop environment.
-/// Pulled out of `main()` as its own function so the KDE-vs-GNOME decision itself is
-/// unit-testable without needing a live desktop session.
+/// Pulled out of `main()` as its own function so the desktop-environment decision
+/// itself is unit-testable without needing a live desktop session.
 fn select_backend(env: DesktopEnvironment) -> (Box<dyn WallpaperBackend>, fn() -> anyhow::Result<Vec<Monitor>>) {
     match env {
         DesktopEnvironment::Kde => (Box::new(KdePlasmaBackend), list_connected_monitors),

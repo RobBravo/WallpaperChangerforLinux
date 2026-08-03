@@ -109,9 +109,10 @@ pub const GNOME_SHARED_MONITOR_UUID: &str = "gnome-shared-desktop";
 /// GNOME, with zero changes needed to any of it.
 ///
 /// Returns a `Result` (rather than a bare `Vec`) purely so this has the exact same
-/// signature as `list_connected_monitors` - callers pick between the two as an
-/// interchangeable function value at runtime - even though this specific
-/// implementation can never actually fail.
+/// signature as `list_connected_monitors` and `list_xfce_monitors` - callers pick
+/// whichever matches the detected desktop environment as an interchangeable function
+/// value at runtime - even though this specific implementation can never actually
+/// fail.
 pub fn list_gnome_monitors() -> anyhow::Result<Vec<Monitor>> {
     Ok(vec![Monitor {
         uuid: GNOME_SHARED_MONITOR_UUID.to_string(),

@@ -34,9 +34,10 @@ fn monitor_label(monitor: &Monitor, position: usize) -> String {
 /// Picks which monitor-listing function to use, and whether the dropdown should show
 /// GNOME's single shared-desktop label instead of per-monitor labels. Pulled out as
 /// its own function so this decision is unit-testable without a live desktop
-/// session - unlike the KDE case, GNOME (and an unrecognized desktop, which falls
-/// back to the same behavior `list_connected_monitors()` failing already has today -
-/// an empty dropdown, no crash) can't be exercised by an automated GUI test at all.
+/// session - unlike the KDE and XFCE cases, GNOME (and an unrecognized desktop, which
+/// falls back to the same behavior `list_connected_monitors()` failing already has
+/// today - an empty dropdown, no crash) can't be exercised by an automated GUI test at
+/// all.
 fn monitor_source(env: Option<DesktopEnvironment>) -> (fn() -> anyhow::Result<Vec<Monitor>>, bool) {
     match env {
         Some(DesktopEnvironment::Gnome) => (list_gnome_monitors, true),
