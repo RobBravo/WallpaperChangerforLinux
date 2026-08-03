@@ -93,6 +93,35 @@ fn kwin_output_config_path() -> PathBuf {
         .join("kwinoutputconfig.json")
 }
 
+/// The fixed UUID used to represent "the whole desktop" under GNOME, which has no
+/// native per-monitor wallpaper support (see `list_gnome_monitors`). Not a real UUID
+/// format on purpose - KDE's UUIDs (from `kwinoutputconfig.json`) always look like
+/// `xxxxxxxx-xxxx-...`, so this can never collide with one.
+pub const GNOME_SHARED_MONITOR_UUID: &str = "gnome-shared-desktop";
+
+/// GNOME has no native way to give each connected monitor its own wallpaper - the
+/// `org.gnome.desktop.background` gsettings key applies one image across the entire
+/// virtual desktop, spanning every monitor. Rather than reimplement per-monitor image
+/// composition (see the design spec's "Multi-monitor behavior under GNOME" section),
+/// this always returns exactly one synthetic `Monitor` representing that shared
+/// desktop - so every per-monitor mechanism elsewhere in this project (`Config`,
+/// `State`, `Engine`, the GUI's selector) degenerates to "exactly one entry" under
+/// GNOME, with zero changes needed to any of it.
+///
+/// Returns a `Result` (rather than a bare `Vec`) purely so this has the exact same
+/// signature as `list_connected_monitors` - callers pick between the two as an
+/// interchangeable function value at runtime - even though this specific
+/// implementation can never actually fail.
+pub fn list_gnome_monitors() -> anyhow::Result<Vec<Monitor>> {
+    Ok(vec![Monitor {
+        uuid: GNOME_SHARED_MONITOR_UUID.to_string(),
+        connector: "GNOME".to_string(),
+        is_primary: true,
+        x: 0,
+        y: 0,
+    }])
+}
+
 /// Lists every currently-connected monitor, each with KDE's own stable UUID.
 ///
 /// Combines two sources: `kscreen-doctor --json` for live connected/priority/position
@@ -257,5 +286,13 @@ mod tests {
     fn malformed_kwin_config_json_returns_an_empty_map_instead_of_panicking() {
         let uuids = parse_kwin_output_uuids("not valid json{{{");
         assert!(uuids.is_empty());
+    }
+
+    #[test]
+    fn list_gnome_monitors_always_returns_one_shared_entry() {
+        let monitors = list_gnome_monitors().unwrap();
+        assert_eq!(monitors.len(), 1);
+        assert_eq!(monitors[0].uuid, GNOME_SHARED_MONITOR_UUID);
+        assert!(monitors[0].is_primary);
     }
 }
