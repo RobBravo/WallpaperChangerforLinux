@@ -7,7 +7,8 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use wallpaper_core::config::{change_now_request_path, gui_lock_path, gui_socket_path, Config, IntervalUnit};
-use wallpaper_core::monitors::{list_connected_monitors, Monitor};
+use wallpaper_core::desktop::{detect_desktop_environment, DesktopEnvironment};
+use wallpaper_core::monitors::{list_connected_monitors, list_gnome_monitors, Monitor};
 use wallpaper_core::state::State;
 
 fn unit_to_index(unit: IntervalUnit) -> i32 {
@@ -28,6 +29,19 @@ fn index_to_unit(index: i32) -> IntervalUnit {
 
 fn monitor_label(monitor: &Monitor, position: usize) -> String {
     format!("Monitor {} ({})", position + 1, monitor.connector)
+}
+
+/// Picks which monitor-listing function to use, and whether the dropdown should show
+/// GNOME's single shared-desktop label instead of per-monitor labels. Pulled out as
+/// its own function so this decision is unit-testable without a live desktop
+/// session - unlike the KDE case, GNOME (and an unrecognized desktop, which falls
+/// back to the same behavior `list_connected_monitors()` failing already has today -
+/// an empty dropdown, no crash) can't be exercised by an automated GUI test at all.
+fn monitor_source(env: Option<DesktopEnvironment>) -> (fn() -> anyhow::Result<Vec<Monitor>>, bool) {
+    match env {
+        Some(DesktopEnvironment::Gnome) => (list_gnome_monitors, true),
+        _ => (list_connected_monitors, false),
+    }
 }
 
 /// Populates the form fields for `uuid` from `config`. Falls back to
@@ -95,8 +109,15 @@ fn refresh_state(ui: &AppWindow, uuid: &str, shown_wallpaper: &RefCell<Option<(S
 /// Preserves the current selection across a refresh when the selected monitor is
 /// still connected (its index may have moved after a resort); falls back to the
 /// first available monitor if it was unplugged, or to no selection if none remain.
+///
+/// `list_monitors`/`is_gnome` come from `monitor_source` - under GNOME this always
+/// returns the same one-entry list, so after the first successful call this becomes
+/// a permanent no-op (the `if *uuids.borrow() == new_uuids` check below), which is
+/// correct: there is nothing to re-detect under GNOME's single shared desktop model.
 fn refresh_monitor_list(
     ui: &AppWindow,
+    list_monitors: fn() -> anyhow::Result<Vec<Monitor>>,
+    is_gnome: bool,
     uuids: &RefCell<Vec<String>>,
     primary_uuid: &RefCell<Option<String>>,
     current_uuid: &RefCell<Option<String>>,
@@ -107,7 +128,7 @@ fn refresh_monitor_list(
     // would wipe an already-populated dropdown and, on the next successful poll,
     // overwrite any unsaved form edits when the selection snaps back. Leaving the
     // existing list untouched is a no-op the first time this runs (it starts empty).
-    let Ok(mut monitors) = list_connected_monitors() else { return };
+    let Ok(mut monitors) = list_monitors() else { return };
     monitors.sort_by(|a, b| a.connector.cmp(&b.connector));
     let new_uuids: Vec<String> = monitors.iter().map(|m| m.uuid.clone()).collect();
 
@@ -116,8 +137,11 @@ fn refresh_monitor_list(
     }
 
     let new_primary = monitors.iter().find(|m| m.is_primary).map(|m| m.uuid.clone());
-    let labels: Vec<slint::SharedString> =
-        monitors.iter().enumerate().map(|(i, m)| monitor_label(m, i).into()).collect();
+    let labels: Vec<slint::SharedString> = if is_gnome {
+        vec!["Todos los monitores".into()]
+    } else {
+        monitors.iter().enumerate().map(|(i, m)| monitor_label(m, i).into()).collect()
+    };
     ui.set_monitor_labels(Rc::new(slint::VecModel::from(labels)).into());
 
     let still_connected = current_uuid.borrow().as_ref().is_some_and(|uuid| new_uuids.contains(uuid));
@@ -180,12 +204,14 @@ fn main() -> anyhow::Result<()> {
     let ui = AppWindow::new()?;
     let tray = GuiTray::new()?;
 
+    let (list_monitors, is_gnome) = monitor_source(detect_desktop_environment());
+
     let uuids: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
     let primary_uuid: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
     let current_uuid: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
     let shown_wallpaper: Rc<RefCell<Option<(String, PathBuf)>>> = Rc::new(RefCell::new(None));
 
-    refresh_monitor_list(&ui, &uuids, &primary_uuid, &current_uuid, &shown_wallpaper);
+    refresh_monitor_list(&ui, list_monitors, is_gnome, &uuids, &primary_uuid, &current_uuid, &shown_wallpaper);
 
     ui.on_monitor_selected({
         let ui_handle = ui.as_weak();
@@ -330,9 +356,9 @@ fn main() -> anyhow::Result<()> {
     }
 
     // Separate from the 1-second state timer above: re-enumerating monitors spawns a
-    // `kscreen-doctor` subprocess, so this runs on its own, coarser cadence rather
-    // than every tick. The GUI is a tray-resident singleton (see
-    // `refresh_monitor_list`'s doc comment) so this is the only thing that ever
+    // `kscreen-doctor` subprocess (or is a no-op under GNOME), so this runs on its own,
+    // coarser cadence rather than every tick. The GUI is a tray-resident singleton
+    // (see `refresh_monitor_list`'s doc comment) so this is the only thing that ever
     // notices a hot-plugged monitor while it's already running.
     let monitor_poll_timer = slint::Timer::default();
     {
@@ -349,7 +375,7 @@ fn main() -> anyhow::Result<()> {
                     if !ui.window().is_visible() {
                         return;
                     }
-                    refresh_monitor_list(&ui, &uuids, &primary_uuid, &current_uuid, &shown_wallpaper);
+                    refresh_monitor_list(&ui, list_monitors, is_gnome, &uuids, &primary_uuid, &current_uuid, &shown_wallpaper);
                 }
             },
         );
@@ -358,4 +384,33 @@ fn main() -> anyhow::Result<()> {
     ui.show()?;
     slint::run_event_loop_until_quit()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn monitor_source_picks_the_gnome_shared_label_and_listing_for_gnome() {
+        let (list_monitors, is_gnome) = monitor_source(Some(DesktopEnvironment::Gnome));
+        assert_eq!(list_monitors as usize, list_gnome_monitors as usize);
+        assert!(is_gnome);
+    }
+
+    #[test]
+    fn monitor_source_picks_the_kde_listing_for_kde() {
+        let (list_monitors, is_gnome) = monitor_source(Some(DesktopEnvironment::Kde));
+        assert_eq!(list_monitors as usize, list_connected_monitors as usize);
+        assert!(!is_gnome);
+    }
+
+    #[test]
+    fn monitor_source_falls_back_to_kde_listing_for_an_unrecognized_desktop() {
+        // Matches list_connected_monitors()'s own existing failure behavior (empty
+        // dropdown, no crash) rather than refusing to show anything at all - a user on
+        // an unsupported desktop might still want to inspect the GUI's settings.
+        let (list_monitors, is_gnome) = monitor_source(None);
+        assert_eq!(list_monitors as usize, list_connected_monitors as usize);
+        assert!(!is_gnome);
+    }
 }
