@@ -87,30 +87,37 @@ ver el historial de commits de `daemon/src/main.rs`), y pausa por monitor.
 
 ---
 
-## Fase 2 — Soporte GNOME (P2)
+## Fase 2 — Soporte GNOME (P2) — ✅ Completada (2026-08-02)
 
 GNOME configura el fondo de pantalla vía `gsettings`, no D-Bus a un shell
-scriptable como Plasma — mecanismo completamente distinto.
+scriptable como Plasma. Investigación previa al diseño encontró un hecho
+clave que no estaba contemplado al escribir esta sección originalmente:
+**GNOME no soporta nativamente un wallpaper distinto por monitor** — la
+clave `org.gnome.desktop.background`/`picture-uri` aplica una sola imagen a
+todo el escritorio virtual, abarcando todos los monitores. Por eso, bajo
+GNOME toda la app se comporta como una configuración compartida única —
+igual que este proyecto se comportaba en KDE antes de la Fase 1 — en vez de
+implementar composición de imágenes (como hacen herramientas de terceros
+tipo HydraPaper).
 
-**Alcance aproximado:**
-- Nuevo backend `core/src/gnome_backend.rs` implementando el mismo trait
-  `WallpaperBackend` ya definido en `core/src/backend.rs` — la separación
-  daemon/GUI y el resto de `wallpaper-core` no deberían necesitar cambios.
-- Mecanismo: `gsettings set org.gnome.desktop.background picture-uri
-  'file:///...'` (y `picture-uri-dark` para temas oscuros en GNOME 42+) —
-  probablemente invocando el binario `gsettings` vía `std::process::Command`,
-  o hablando directo con `dconf`/D-Bus si se quiere evitar el binario externo
-  (a decidir en el brainstorming de esta fase).
-- GNOME expone monitores de forma distinta a KDE (`gnome-monitor-config`) —
-  si la Fase 1 ya está implementada, este backend tiene que mapear su propio
-  modelo de monitores al esquema genérico que definió esa fase.
-- Detección del entorno de escritorio en tiempo de ejecución para elegir
-  backend (`$XDG_CURRENT_DESKTOP`), o build separado por DE — **decisión de
-  arquitectura pendiente**, afecta cómo se estructura `main()` en el daemon.
+`daemon/src/main.rs` y `gui/src/main.rs` detectan el escritorio actual una
+sola vez al arrancar (vía `$XDG_CURRENT_DESKTOP`, manejando valores
+compuestos como `"ubuntu:GNOME"`) y eligen el backend/función de detección
+de monitores correspondiente en tiempo de ejecución — un solo binario, sin
+builds separados por escritorio. Un escritorio no reconocido hace que el
+daemon salga con un mensaje claro en vez de asumir KDE silenciosamente.
+`core/src/gnome_backend.rs` aplica el wallpaper vía el binario `gsettings`
+(sin shell, sin superficie de inyección — a diferencia del script D-Bus de
+KDE, que sí necesita escapar la ruta).
 
-**Esfuerzo estimado:** medio — el mecanismo es más simple que el de KDE (sin
-scripting), pero agrega la pregunta de detección de entorno que hoy no
-existe (el proyecto asume KDE siempre).
+**Verificado:** solo con tests automatizados (detección de escritorio,
+selección de backend, construcción de los argumentos de `gsettings`,
+etc.) — **ningún test se corrió en una sesión GNOME real**, porque no había
+ninguna disponible durante el desarrollo. Si alguien con acceso a GNOME
+quiere confirmar el comportamiento en vivo, esto es lo que falta probar:
+que el ícono de bandeja y la GUI detectan GNOME correctamente, que
+`gsettings` efectivamente cambia el fondo, y que la migración automática
+de un `config.toml` viejo funciona igual que en KDE.
 
 ---
 
@@ -143,5 +150,5 @@ diseño.
 |---|---|---|---|
 | 0 | Verificación pendiente + deuda técnica | P0 | Chico |
 | 1 | Multipantalla (KDE) | P1 | Grande — ✅ Completada |
-| 2 | Soporte GNOME | P2 | Mediano |
+| 2 | Soporte GNOME | P2 | Mediano — ✅ Completada (sin verificar en vivo) |
 | 3 | Soporte XFCE | P2 | Mediano-grande (incertidumbre) |

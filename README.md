@@ -1,17 +1,26 @@
 # Wallpaper Changer Linux
 
-Rotador de fondos de pantalla para **KDE Plasma**, escrito en Rust. Corre como un
-daemon en segundo plano que cambia el wallpaper del escritorio a intervalos
-configurables, tomando las imágenes de una carpeta que elijas, más una interfaz
-gráfica simple para configurarlo.
+Rotador de fondos de pantalla para **KDE Plasma** y **GNOME**, escrito en Rust.
+Corre como un daemon en segundo plano que cambia el wallpaper del escritorio a
+intervalos configurables, tomando las imágenes de una carpeta que elijas, más
+una interfaz gráfica simple para configurarlo.
 
 - Repositorio: https://github.com/RobBravo/WallpaperChangerforLinux
-- Plataforma soportada: **KDE Plasma** únicamente (usa D-Bus y `org.kde.PlasmaShell`
-  directamente). No funciona en GNOME, XFCE u otros escritorios.
-- **Soporte multipantalla:** cada monitor conectado tiene su propia carpeta,
-  intervalo y pausa, con rotación independiente. Con un solo monitor conectado
-  se comporta igual que antes.
-- Soporte para GNOME y XFCE está planeado — ver [`ROADMAP.md`](ROADMAP.md).
+- Plataforma soportada: **KDE Plasma** y **GNOME** (detecta cuál estás usando
+  automáticamente, un solo binario para ambos). No funciona en XFCE u otros
+  escritorios todavía.
+- **Soporte multipantalla en KDE:** cada monitor conectado tiene su propia
+  carpeta, intervalo y pausa, con rotación independiente. Con un solo monitor
+  conectado se comporta igual que antes.
+- **En GNOME, un solo fondo compartido:** GNOME no soporta nativamente un
+  wallpaper distinto por monitor, así que ahí la app usa una configuración
+  única para todos los monitores conectados — ver la sección
+  [Multipantalla](#multipantalla) más abajo.
+- **Soporte GNOME sin verificar en hardware real:** se implementó y probó con
+  tests automatizados, pero no hubo una sesión GNOME real disponible durante
+  el desarrollo — ver [Solución de problemas](#solución-de-problemas) si algo
+  no funciona como se espera.
+- Soporte para XFCE está planeado — ver [`ROADMAP.md`](ROADMAP.md).
 
 ---
 
@@ -19,7 +28,7 @@ gráfica simple para configurarlo.
 
 - [Cómo funciona](#cómo-funciona)
 - [Arquitectura del proyecto](#arquitectura-del-proyecto)
-- [Instalación en KDE Plasma](#instalación-en-kde-plasma)
+- [Instalación](#instalación)
 - [Uso diario](#uso-diario)
 - [Archivos de configuración](#archivos-de-configuración)
 - [Desinstalación](#desinstalación)
@@ -55,11 +64,12 @@ la última configuración guardada.
 
 ### Multipantalla
 
-Cada monitor conectado se identifica por un UUID estable que KDE ya le asigna
-internamente (vía KScreen) — el mismo UUID persiste entre reinicios y aunque
-cambies el monitor de puerto. `config.toml`/`state.toml` guardan una entrada
-por monitor, cada una con su propia carpeta, intervalo, pausa, imagen actual y
-próximo cambio — la rotación de un monitor no afecta a la de otro.
+**En KDE Plasma**, cada monitor conectado se identifica por un UUID estable
+que KDE ya le asigna internamente (vía KScreen) — el mismo UUID persiste
+entre reinicios y aunque cambies el monitor de puerto. `config.toml`/
+`state.toml` guardan una entrada por monitor, cada una con su propia
+carpeta, intervalo, pausa, imagen actual y próximo cambio — la rotación de
+un monitor no afecta a la de otro.
 
 - **Monitor nuevo:** la primera vez que se detecta un monitor nunca antes
   visto, copia la carpeta/intervalo/pausa del monitor marcado como principal.
@@ -73,6 +83,16 @@ próximo cambio — la rotación de un monitor no afecta a la de otro.
 - El ícono de la bandeja del daemon ("Pausar/Reanudar", "Cambiar ahora") actúa
   sobre el **monitor principal** — para controlar un monitor secundario, usá
   el desplegable de la GUI.
+
+**En GNOME**, no hay nada de esto: GNOME no tiene forma nativa de poner un
+wallpaper distinto en cada monitor (la clave de `gsettings` que controla el
+fondo aplica una sola imagen a todo el escritorio virtual, sin importar
+cuántas pantallas tengas conectadas). Por eso, bajo GNOME la app usa una
+**única configuración compartida** para todos los monitores — el desplegable
+de la GUI muestra una sola entrada, "Todos los monitores", y tanto el ícono
+de bandeja como la GUI controlan esa misma configuración única. Es
+exactamente el mismo comportamiento que tenía este proyecto en KDE antes de
+tener soporte multipantalla.
 
 ### El ciclo de rotación (por cada monitor)
 
@@ -119,18 +139,23 @@ WallpaperChangerLinux/
 │       │                del formato viejo (monitor único)
 │       ├── state.rs     State = Vec<MonitorState> (imagen actual, próximo
 │       │                cambio por monitor) + carga/guardado TOML
-│       ├── monitors.rs  lista de monitores conectados + su UUID estable
+│       ├── monitors.rs  lista de monitores conectados + su UUID estable en KDE
 │       │                (combina `kscreen-doctor --json` y
-│       │                `~/.config/kwinoutputconfig.json`)
+│       │                `~/.config/kwinoutputconfig.json`); en GNOME, siempre
+│       │                un único monitor sintético compartido
+│       ├── desktop.rs   detecta KDE vs. GNOME vía $XDG_CURRENT_DESKTOP
 │       ├── scanner.rs   escaneo de la carpeta de imágenes
 │       ├── queue.rs     cola de rotación "barajar y consumir sin repetir"
-│       ├── backend.rs   trait WallpaperBackend (por si algún día se soporta otro DE)
-│       └── kde_backend.rs   implementación para KDE Plasma vía D-Bus —
-│                            aplica la imagen al monitor correcto por posición
+│       ├── backend.rs   trait WallpaperBackend + soporte para elegir la
+│       │                implementación en tiempo de ejecución
+│       ├── kde_backend.rs   implementación para KDE Plasma vía D-Bus —
+│       │                    aplica la imagen al monitor correcto por posición
+│       └── gnome_backend.rs implementación para GNOME vía el binario `gsettings`
 ├── daemon/   wallpaper-changer-daemon
 │   └── src/
 │       ├── main.rs      bucle principal (hilos + mpsc, sin runtime async) —
-│       │                deadline y detección de conexión/desconexión por monitor
+│       │                elige backend KDE/GNOME al arrancar; deadline y
+│       │                detección de conexión/desconexión por monitor
 │       ├── engine.rs    motor de rotación — una cola independiente por monitor
 │       ├── watcher.rs   observador de archivos (notify/inotify)
 │       └── tray.rs      ícono de bandeja del daemon (ksni)
@@ -160,6 +185,7 @@ por los archivos compartidos, nunca por llamadas directas.
 | Interfaz gráfica | [`slint`](https://crates.io/crates/slint) (incluye ícono de bandeja nativo) |
 | Ícono de bandeja del daemon | [`ksni`](https://crates.io/crates/ksni) |
 | D-Bus (aplicar el wallpaper en Plasma) | [`zbus`](https://crates.io/crates/zbus) |
+| Aplicar el wallpaper en GNOME | binario `gsettings` (vía `std::process::Command`, sin dependencia nueva) |
 | Observar cambios de archivos | [`notify`](https://crates.io/crates/notify) |
 | Selector nativo de carpetas | [`rfd`](https://crates.io/crates/rfd) |
 | Serialización de config/estado | `serde` + `toml` |
@@ -169,21 +195,26 @@ deliberadamente simple: hilos de sistema operativo y canales `mpsc`.
 
 ---
 
-## Instalación en KDE Plasma
+## Instalación
+
+La app detecta sola si estás en KDE Plasma o GNOME (vía `$XDG_CURRENT_DESKTOP`)
+y usa el backend correcto — los pasos de instalación son los mismos para
+ambos.
 
 ### Requisitos previos
 
-1. **KDE Plasma** (Wayland o X11).
+1. **KDE Plasma** (Wayland o X11) **o GNOME**. En GNOME hace falta el binario
+   `gsettings` — viene instalado por defecto en cualquier sistema con GNOME.
 2. **Rust** (edición 2021 o más nueva). Si no lo tenés instalado:
    ```bash
    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
    ```
    Luego reiniciá la terminal o corré `source "$HOME/.cargo/env"`.
 3. **`git`** para clonar el repositorio.
-4. Las librerías de desarrollo típicas de un entorno gráfico KDE Plasma
-   (Wayland/X11, fontconfig, etc.) — si ya podés compilar y correr
-   aplicaciones gráficas en tu sistema, ya las tenés. En Fedora, por ejemplo,
-   el grupo `@development-tools` junto con un entorno Plasma completo alcanza.
+4. Las librerías de desarrollo típicas de un entorno gráfico (Wayland/X11,
+   fontconfig, etc.) — si ya podés compilar y correr aplicaciones gráficas en
+   tu sistema, ya las tenés. En Fedora, por ejemplo, el grupo
+   `@development-tools` junto con un entorno de escritorio completo alcanza.
 
 ### Pasos
 
@@ -235,6 +266,11 @@ configuración.
 ---
 
 ## Uso diario
+
+Las distinciones "por monitor" de esta sección aplican en KDE Plasma; en
+GNOME solo hay una configuración compartida (ver
+[Multipantalla](#multipantalla)), así que ahí la GUI y la bandeja siempre
+controlan lo mismo.
 
 - **Cambiar de carpeta o intervalo:** abrí la GUI, elegí el monitor en el
   desplegable si tenés más de uno, ajustá los campos, "Guardar".
@@ -351,6 +387,28 @@ a cuál `Desktop` de Plasma corresponde cada monitor por su posición relativa
 (de arriba hacia abajo, de izquierda a derecha), no por nombre. Si tenés
 varios monitores con posiciones fuera de lo común (superpuestos, rotados), es
 el escenario menos probado de esta función.
+
+**En GNOME, el daemon no arranca o el wallpaper no cambia nunca (soporte sin
+verificar en hardware real):**
+- Confirmá que la app detectó GNOME correctamente:
+  ```bash
+  echo $XDG_CURRENT_DESKTOP
+  journalctl --user -u wallpaper-changer-daemon -n 20
+  ```
+  Si ves un error mencionando "desktop environment ... is not supported", tu
+  `$XDG_CURRENT_DESKTOP` no contiene ni `KDE` ni `GNOME` en ninguna de sus
+  partes (separadas por `:`) — esto puede pasar en variantes de GNOME poco
+  comunes o mal configuradas.
+- Confirmá que el binario `gsettings` está instalado y funciona:
+  ```bash
+  gsettings get org.gnome.desktop.background picture-uri
+  ```
+  Si este comando falla, el problema es de tu sistema GNOME, no de la app.
+- El desplegable de la GUI debería mostrar una sola entrada, "Todos los
+  monitores" — si en cambio no aparece nada, o aparecen entradas con nombres
+  de monitor individuales, la detección de escritorio no está funcionando
+  como se espera; por favor reportá el problema en el repositorio con la
+  salida de `echo $XDG_CURRENT_DESKTOP` y la versión de GNOME.
 
 ---
 
