@@ -1,4 +1,5 @@
 pub mod config;
+pub mod desktop;
 pub mod fs_util;
 pub mod state;
 pub mod scanner;
