@@ -121,26 +121,55 @@ de un `config.toml` viejo funciona igual que en KDE.
 
 ---
 
-## Fase 3 — Soporte XFCE (P2, junto con GNOME)
+## Fase 3 — Soporte XFCE (P2) — ✅ Completada (2026-08-03)
 
 XFCE usa `xfconf-query`, con la complicación de que la ruta de la propiedad
 incluye el monitor **y el workspace** (ej.
-`/backdrop/screen0/monitor0/workspace0/last-image`), y varía según cuántos
-monitores/workspaces tenga configurados el usuario.
+`/backdrop/screen0/monitorDP-1/workspace0/last-image`), y varía según cuántos
+monitores/workspaces tenga configurados el usuario. A diferencia de GNOME,
+la investigación previa al diseño confirmó que **XFCE sí soporta
+nativamente un wallpaper distinto por monitor** — esta fase le da a XFCE
+rotación real por monitor, igual que KDE, no el modelo compartido de GNOME.
 
-**Alcance aproximado:**
-- Nuevo backend `core/src/xfce_backend.rs`, mismo trait `WallpaperBackend`.
-- Enumerar las propiedades reales de xfconf en tiempo de ejecución (no se
-  pueden asumir rutas fijas) y escribir la imagen en cada una — vía
-  `xfconf-query -c xfce4-desktop -p <ruta> -s <archivo>` o la librería
-  `libxfconf` si existe un binding de Rust razonable.
-- Mismo punto de la Fase 1: si hay soporte multipantalla, este backend
-  necesita mapear los workspaces/monitores de XFCE al modelo genérico.
+`core/src/xfce_backend.rs` enumera las propiedades reales del canal
+`xfce4-desktop` en tiempo de ejecución (`xfconf-query -c xfce4-desktop -l`,
+sin asumir rutas fijas) y escribe la imagen en cada propiedad `last-image`
+existente del monitor destino — todos los workspaces a la vez, no solo
+`workspace0`, para que el fondo se vea correcto sin importar en cuál
+escritorio virtual esté el usuario. Si el monitor nunca tuvo ninguna
+propiedad (nunca se le puso fondo manualmente), escribe una de respaldo en
+`workspace0` con las flags `-n`/`-t` que `xfconf-query` exige para crear una
+propiedad nueva. Como XFCE no tiene un UUID estable ni un concepto de
+"monitor principal" como KDE, se usa el identificador que xfconf ya reporta
+tal cual, y se elige como principal el que ordena primero alfabéticamente
+(solo para decidir qué monitor dona su configuración a uno nuevo — un caso
+real de un monitor recién conectado terminando primero alfabéticamente y
+"tapando" a un hermano ya configurado se encontró y se corrigió durante esta
+fase, con test de regresión en `daemon/src/engine.rs`).
 
-**Esfuerzo estimado:** el más incierto de los tres — la variabilidad de rutas
-de xfconf según la configuración del usuario es la parte más delicada, vale
-la pena investigarla a fondo en el brainstorming antes de comprometerse a un
-diseño.
+`core/src/desktop.rs`, `daemon/src/main.rs`, `gui/src/main.rs` y
+`core/src/config.rs::migration_list_monitors` ganan el tercer caso `Xfce`
+junto a `Kde`/`Gnome`, siguiendo exactamente el mismo patrón que estableció
+la Fase 2. `daemon/src/tray.rs` no necesitó ningún cambio.
+
+**Limitación conocida, documentada y aceptada (no se resuelve en esta
+fase):** un monitor que `xfconf`/`xfdesktop` nunca tocó (nunca se le puso
+fondo desde los Ajustes de Apariencia de XFCE) no aparece en la lista de
+monitores de la app, porque no hay una herramienta independiente tipo
+`xrandr` cruzada contra xfconf para detectarlo. Si en la práctica resulta un
+problema real, resolverlo (probablemente agregando `xrandr` como segunda
+fuente) queda como trabajo de seguimiento aparte.
+
+**Verificado:** solo con tests automatizados (detección de escritorio,
+parseo de rutas de xfconf, construcción de los argumentos de
+`xfconf-query`, selección de backend, etc.) — **ningún test se corrió en una
+sesión XFCE real**, porque no había ninguna disponible durante el
+desarrollo. Si alguien con acceso a XFCE quiere confirmar el comportamiento
+en vivo, esto es lo que falta probar: que el ícono de bandeja y la GUI
+detectan XFCE correctamente, que `xfconf-query` efectivamente cambia el
+fondo de cada monitor, que la rotación por monitor funciona con más de una
+pantalla conectada, y que la migración automática de un `config.toml` viejo
+funciona igual que en KDE.
 
 ---
 
@@ -151,4 +180,4 @@ diseño.
 | 0 | Verificación pendiente + deuda técnica | P0 | Chico |
 | 1 | Multipantalla (KDE) | P1 | Grande — ✅ Completada |
 | 2 | Soporte GNOME | P2 | Mediano — ✅ Completada (sin verificar en vivo) |
-| 3 | Soporte XFCE | P2 | Mediano-grande (incertidumbre) |
+| 3 | Soporte XFCE | P2 | Mediano-grande — ✅ Completada (sin verificar en vivo) |

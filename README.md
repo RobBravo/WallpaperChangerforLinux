@@ -1,26 +1,26 @@
 # Wallpaper Changer Linux
 
-Rotador de fondos de pantalla para **KDE Plasma** y **GNOME**, escrito en Rust.
-Corre como un daemon en segundo plano que cambia el wallpaper del escritorio a
-intervalos configurables, tomando las imágenes de una carpeta que elijas, más
-una interfaz gráfica simple para configurarlo.
+Rotador de fondos de pantalla para **KDE Plasma**, **GNOME** y **XFCE**,
+escrito en Rust. Corre como un daemon en segundo plano que cambia el
+wallpaper del escritorio a intervalos configurables, tomando las imágenes de
+una carpeta que elijas, más una interfaz gráfica simple para configurarlo.
 
 - Repositorio: https://github.com/RobBravo/WallpaperChangerforLinux
-- Plataforma soportada: **KDE Plasma** y **GNOME** (detecta cuál estás usando
-  automáticamente, un solo binario para ambos). No funciona en XFCE u otros
-  escritorios todavía.
-- **Soporte multipantalla en KDE:** cada monitor conectado tiene su propia
-  carpeta, intervalo y pausa, con rotación independiente. Con un solo monitor
-  conectado se comporta igual que antes.
+- Plataforma soportada: **KDE Plasma**, **GNOME** y **XFCE** (detecta cuál
+  estás usando automáticamente, un solo binario para los tres). No funciona
+  en otros escritorios todavía.
+- **Soporte multipantalla en KDE y XFCE:** cada monitor conectado tiene su
+  propia carpeta, intervalo y pausa, con rotación independiente. Con un solo
+  monitor conectado se comporta igual que antes.
 - **En GNOME, un solo fondo compartido:** GNOME no soporta nativamente un
   wallpaper distinto por monitor, así que ahí la app usa una configuración
   única para todos los monitores conectados — ver la sección
   [Multipantalla](#multipantalla) más abajo.
-- **Soporte GNOME sin verificar en hardware real:** se implementó y probó con
-  tests automatizados, pero no hubo una sesión GNOME real disponible durante
-  el desarrollo — ver [Solución de problemas](#solución-de-problemas) si algo
-  no funciona como se espera.
-- Soporte para XFCE está planeado — ver [`ROADMAP.md`](ROADMAP.md).
+- **Soporte GNOME y XFCE sin verificar en hardware real:** ambos se
+  implementaron y probaron con tests automatizados, pero no hubo una sesión
+  GNOME ni XFCE real disponible durante el desarrollo — ver
+  [Solución de problemas](#solución-de-problemas) si algo no funciona como se
+  espera.
 
 ---
 
@@ -94,6 +94,23 @@ de bandeja como la GUI controlan esa misma configuración única. Es
 exactamente el mismo comportamiento que tenía este proyecto en KDE antes de
 tener soporte multipantalla.
 
+**En XFCE**, la rotación también es independiente por monitor, igual que en
+KDE, pero la identificación del monitor es distinta: XFCE no tiene un UUID
+estable como KDE, así que la app usa directamente el identificador que
+`xfconf` ya le asigna (por ejemplo `monitorDP-1`, o un índice numérico en
+versiones más viejas de XFCE). Como XFCE tampoco tiene concepto de "monitor
+principal", la app elige como principal el identificador que ordena primero
+alfabéticamente — solo se usa para decidir de cuál monitor copiar la
+configuración cuando aparece uno nuevo, no afecta a cuál monitor se le
+aplica cada imagen.
+
+**Limitación conocida de XFCE:** un monitor que nunca tuvo un fondo puesto
+manualmente desde los Ajustes de Apariencia de XFCE no aparece en el
+desplegable de la GUI hasta que lo hagas una vez — la app depende de que
+`xfconf` ya tenga una propiedad `last-image` para ese monitor, y no hay una
+forma independiente (tipo `xrandr`) de listar monitores conectados en XFCE
+como sí la hay en KDE.
+
 ### El ciclo de rotación (por cada monitor)
 
 1. El daemon lee `config.toml` al arrancar (y cada vez que detecta que
@@ -139,23 +156,29 @@ WallpaperChangerLinux/
 │       │                del formato viejo (monitor único)
 │       ├── state.rs     State = Vec<MonitorState> (imagen actual, próximo
 │       │                cambio por monitor) + carga/guardado TOML
-│       ├── monitors.rs  lista de monitores conectados + su UUID estable en KDE
-│       │                (combina `kscreen-doctor --json` y
-│       │                `~/.config/kwinoutputconfig.json`); en GNOME, siempre
-│       │                un único monitor sintético compartido
-│       ├── desktop.rs   detecta KDE vs. GNOME vía $XDG_CURRENT_DESKTOP
+│       ├── monitors.rs  lista de monitores conectados + su identificador
+│       │                (UUID estable en KDE, combinando `kscreen-doctor
+│       │                --json` y `~/.config/kwinoutputconfig.json`; en
+│       │                GNOME, siempre un único monitor sintético
+│       │                compartido; en XFCE, el identificador que ya
+│       │                reporta `xfconf-query -c xfce4-desktop -l`)
+│       ├── desktop.rs   detecta KDE, GNOME o XFCE vía $XDG_CURRENT_DESKTOP
 │       ├── scanner.rs   escaneo de la carpeta de imágenes
 │       ├── queue.rs     cola de rotación "barajar y consumir sin repetir"
 │       ├── backend.rs   trait WallpaperBackend + soporte para elegir la
 │       │                implementación en tiempo de ejecución
 │       ├── kde_backend.rs   implementación para KDE Plasma vía D-Bus —
 │       │                    aplica la imagen al monitor correcto por posición
-│       └── gnome_backend.rs implementación para GNOME vía el binario `gsettings`
+│       ├── gnome_backend.rs implementación para GNOME vía el binario `gsettings`
+│       └── xfce_backend.rs  implementación para XFCE vía el binario
+│                            `xfconf-query`, escribiendo cada propiedad
+│                            `last-image` existente del monitor
 ├── daemon/   wallpaper-changer-daemon
 │   └── src/
 │       ├── main.rs      bucle principal (hilos + mpsc, sin runtime async) —
-│       │                elige backend KDE/GNOME al arrancar; deadline y
-│       │                detección de conexión/desconexión por monitor
+│       │                elige backend según el escritorio detectado al
+│       │                arrancar; deadline y detección de conexión/
+│       │                desconexión por monitor
 │       ├── engine.rs    motor de rotación — una cola independiente por monitor
 │       ├── watcher.rs   observador de archivos (notify/inotify)
 │       └── tray.rs      ícono de bandeja del daemon (ksni)
@@ -186,6 +209,7 @@ por los archivos compartidos, nunca por llamadas directas.
 | Ícono de bandeja del daemon | [`ksni`](https://crates.io/crates/ksni) |
 | D-Bus (aplicar el wallpaper en Plasma) | [`zbus`](https://crates.io/crates/zbus) |
 | Aplicar el wallpaper en GNOME | binario `gsettings` (vía `std::process::Command`, sin dependencia nueva) |
+| Aplicar el wallpaper en XFCE | binario `xfconf-query` (vía `std::process::Command`, sin dependencia nueva) |
 | Observar cambios de archivos | [`notify`](https://crates.io/crates/notify) |
 | Selector nativo de carpetas | [`rfd`](https://crates.io/crates/rfd) |
 | Serialización de config/estado | `serde` + `toml` |
@@ -197,14 +221,15 @@ deliberadamente simple: hilos de sistema operativo y canales `mpsc`.
 
 ## Instalación
 
-La app detecta sola si estás en KDE Plasma o GNOME (vía `$XDG_CURRENT_DESKTOP`)
-y usa el backend correcto — los pasos de instalación son los mismos para
-ambos.
+La app detecta sola si estás en KDE Plasma, GNOME o XFCE (vía
+`$XDG_CURRENT_DESKTOP`) y usa el backend correcto — los pasos de instalación
+son los mismos para los tres.
 
 ### Requisitos previos
 
-1. **KDE Plasma** (Wayland o X11) **o GNOME**. En GNOME hace falta el binario
-   `gsettings` — viene instalado por defecto en cualquier sistema con GNOME.
+1. **KDE Plasma** (Wayland o X11), **GNOME** o **XFCE**. En GNOME hace falta
+   el binario `gsettings`; en XFCE hace falta el binario `xfconf-query` —
+   ambos vienen instalados por defecto en cualquier sistema con ese entorno.
 2. **Rust** (edición 2021 o más nueva). Si no lo tenés instalado:
    ```bash
    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
@@ -267,8 +292,8 @@ configuración.
 
 ## Uso diario
 
-Las distinciones "por monitor" de esta sección aplican en KDE Plasma; en
-GNOME solo hay una configuración compartida (ver
+Las distinciones "por monitor" de esta sección aplican en KDE Plasma y XFCE;
+en GNOME solo hay una configuración compartida (ver
 [Multipantalla](#multipantalla)), así que ahí la GUI y la bandeja siempre
 controlan lo mismo.
 
@@ -409,6 +434,25 @@ verificar en hardware real):**
   de monitor individuales, la detección de escritorio no está funcionando
   como se espera; por favor reportá el problema en el repositorio con la
   salida de `echo $XDG_CURRENT_DESKTOP` y la versión de GNOME.
+
+**En XFCE, un monitor no aparece en el desplegable de la GUI (soporte sin
+verificar en hardware real):**
+- Confirmá que la app detectó XFCE correctamente:
+  ```bash
+  echo $XDG_CURRENT_DESKTOP
+  journalctl --user -u wallpaper-changer-daemon -n 20
+  ```
+- Confirmá que `xfconf-query` ya tiene una propiedad `last-image` para ese
+  monitor — es la única fuente que usa la app para saber qué monitores
+  existen (no hay un `xrandr` de respaldo):
+  ```bash
+  xfconf-query -c xfce4-desktop -l | grep last-image
+  ```
+  Si tu monitor no aparece ahí, abrí los Ajustes de Apariencia de XFCE y
+  ponele cualquier fondo manualmente una vez — después de eso, la app ya
+  debería detectarlo.
+- Si el problema persiste, reportalo en el repositorio con la salida de los
+  dos comandos anteriores y la versión de XFCE.
 
 ---
 
