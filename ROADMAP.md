@@ -14,7 +14,7 @@ están tomadas — se listan como preguntas abiertas en cada sección.
 
 ---
 
-## Fase 0 — Cerrar el trabajo actual (P0, prioridad inmediata)
+## Fase 0 — Cerrar el trabajo actual (P0, prioridad inmediata) — ✅ Completada (2026-08-03)
 
 Nada de esto es una feature nueva: son huecos de verificación y deuda técnica
 ya identificados en las revisiones de código anteriores, documentados pero no
@@ -24,8 +24,9 @@ empezar features grandes sobre una base sin terminar de verificar.
 **Verificación pendiente del plan original (Task 14):**
 - [x] Confirmar que el wallpaper **no** rota mientras el daemon está pausado
       (verificado en vivo: 2026-08-02).
-- [ ] Confirmar autoarranque real: cerrar sesión/reiniciar y ver que el
-      daemon arranca solo, sin intervención manual.
+- [x] Confirmar autoarranque real: cerrar sesión/reiniciar y ver que el
+      daemon arranca solo, sin intervención manual (verificado en vivo con
+      varios reinicios reales de la máquina: 2026-08-03).
 - [x] Confirmar que vaciar la carpeta configurada no rompe el daemon (debe
       loguear "no wallpapers found" y seguir corriendo — verificado en vivo:
       2026-08-02).
@@ -85,6 +86,12 @@ ver el historial de commits de `daemon/src/main.rs`), y pausa por monitor.
   sesión KWin real con más de un monitor — lo único que el diseño marcó
   desde el principio como imposible de verificar sin ese hardware.
 
+**Cerrado como limitación de hardware, no como pendiente:** esta máquina es
+una MacBook Pro mid-2012 sin ningún monitor externo compatible disponible —
+no hay forma de correr esta verificación en este equipo. Queda aceptado tal
+cual (cubierto por unit tests) hasta que haya acceso a un segundo monitor
+físico; no bloquea el cierre de este proyecto.
+
 ---
 
 ## Fase 2 — Soporte GNOME (P2) — ✅ Completada (2026-08-02)
@@ -118,6 +125,13 @@ quiere confirmar el comportamiento en vivo, esto es lo que falta probar:
 que el ícono de bandeja y la GUI detectan GNOME correctamente, que
 `gsettings` efectivamente cambia el fondo, y que la migración automática
 de un `config.toml` viejo funciona igual que en KDE.
+
+**Verificación en vivo planeada vía Docker, no en este equipo:** ya existe un
+diseño para probar el backend de GNOME dentro de un contenedor (ver
+`docs/superpowers/specs/2026-08-02-gnome-docker-verification-design.md` y su
+plan asociado), en vez de instalar GNOME directamente en esta máquina. Queda
+como trabajo de seguimiento independiente, no bloquea el cierre de este
+proyecto.
 
 ---
 
@@ -171,13 +185,25 @@ fondo de cada monitor, que la rotación por monitor funciona con más de una
 pantalla conectada, y que la migración automática de un `config.toml` viejo
 funciona igual que en KDE.
 
+**Verificación en vivo planeada vía Docker, no en este equipo:** mismo
+enfoque que GNOME — probar el backend de XFCE en un contenedor en vez de
+instalar el entorno directamente en esta máquina. Todavía no tiene spec ni
+plan propios (sí existen para GNOME, como precedente a seguir). Queda como
+trabajo de seguimiento independiente, no bloquea el cierre de este proyecto.
+
 ---
 
 ## Resumen de prioridad
 
 | Fase | Qué | Prioridad | Tamaño |
 |---|---|---|---|
-| 0 | Verificación pendiente + deuda técnica | P0 | Chico |
-| 1 | Multipantalla (KDE) | P1 | Grande — ✅ Completada |
-| 2 | Soporte GNOME | P2 | Mediano — ✅ Completada (sin verificar en vivo) |
-| 3 | Soporte XFCE | P2 | Mediano-grande — ✅ Completada (sin verificar en vivo) |
+| 0 | Verificación pendiente + deuda técnica | P0 | Chico — ✅ Completada |
+| 1 | Multipantalla (KDE) | P1 | Grande — ✅ Completada (multi-monitor real sin verificar — sin hardware compatible en esta máquina) |
+| 2 | Soporte GNOME | P2 | Mediano — ✅ Completada (sin verificar en vivo — planeado vía Docker) |
+| 3 | Soporte XFCE | P2 | Mediano-grande — ✅ Completada (sin verificar en vivo — planeado vía Docker) |
+
+**Proyecto cerrado (2026-08-03):** las cuatro fases están implementadas,
+testeadas y en `main`. Lo que queda (verificación en vivo de GNOME/XFCE vía
+Docker, y multi-monitor real en KDE) depende de recursos que no existen en
+este equipo — quedan documentados como trabajo de seguimiento opcional, no
+como deuda pendiente de este proyecto.
